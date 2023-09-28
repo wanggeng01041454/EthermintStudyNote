@@ -1,0 +1,509 @@
+
+@startuml 1.tx编解码类图
+    title
+        Tx编解码类图
+    end title
+
+    'left to right direction
+
+    namespace CosmosSDK {
+        namespace baseapp {
+            struct BaseApp {
+                sdk.TxDecoder txDecoder
+            }
+            note left of BaseApp::txDecoder
+                事务解码函数指针，函数原型为：
+                type TxDecoder func(txBytes []byte) (Tx, error)
+                字段初始化：
+                txDecoder = encodingConfig.TxConfig.TxDecoder()
+            end note
+        }
+        namespace codec.types {
+            interface AnyUnpacker #LimeGreen {
+                UnpackAny(interface{}) error
+            }
+            note top of AnyUnpacker
+                这个接口是 interfaceRegistry 结构
+                使用在它里面注册的模块解码任意消息的关键点。
+                ----
+                编码后的消息中有其所属模块的类型URL，
+                通过类型URL可以找到对应的模块，
+            end note 
+
+            interface InterfaceRegistry #SkyBlue {
+
+            }
+            AnyUnpacker <|- InterfaceRegistry
+
+            struct interfaceRegistry {
+                map[string]reflect.Type interfaceNames
+                ....
+                map[reflect.Type]interfaceMap interfaceImpls
+                ....
+                map[string]reflect.Type typeURLMap
+            }
+            InterfaceRegistry <|-- interfaceRegistry
+        }
+
+        namespace client {
+            interface TxEncodingConfig {
+                <b><color:blue>func</color></b> TxEncoder
+                ....
+                <b><color:blue>func</color></b> TxDecoder
+                ....
+                <b><color:blue>func</color></b> TxJSONEncoder
+                ....
+                <b><color:blue>func</color></b> TxJSONDecoder
+            }
+
+            interface TxConfig #SkyBlue {
+
+            }
+            TxEncodingConfig <|-- TxConfig
+        }
+        namespace x.auth.tx {
+            struct config {
+                signing.SignModeHandler handler
+                ....
+                sdk.TxDecoder decoder
+                ....
+                sdk.TxEncoder encoder
+                ....
+                sdk.TxDecoder jsonDecoder
+                ....
+                sdk.TxEncoder jsonEncoder
+                ....
+                codec.ProtoCodecMarshaler protoCodec
+            }
+            entity DefaultTxDecoder as "<b><color:blue>func</color></b> DefaultTxDecoder" {
+                // 返回一个闭包函数作为 txDecoder
+            }
+            entity DefaultTxEncoder as "<b><color:blue>func</color></b> DefaultTxEncoder"
+
+            config::decoder -> DefaultTxDecoder
+            config::encoder --> DefaultTxEncoder
+        }
+        client.TxConfig <|-- x.auth.tx.config
+
+        namespace codec {
+            interface BinaryCodec {
+
+            }
+            interface JSONCodec {
+
+            }
+
+            interface Codec #SkyBlue {
+
+            }
+            BinaryCodec <|-- Codec
+            JSONCodec <|-- Codec
+
+            interface ProtoCodecMarshaler {
+
+            }
+            Codec <|-- ProtoCodecMarshaler
+
+            interface ProtoMarshaler {
+                //每个proto消息都要实现该接口
+            }
+            struct ProtoCodec {
+                types.InterfaceRegistry interfaceRegistry
+            }
+            note left of ProtoCodec
+                //ProtoCodec的Unmarshal函数实现：
+                <code>
+                Unmarshal(bz []byte, ptr ProtoMarshaler){
+                    ptr.Unmarshal(bz) // 
+                    types.UnpackInterfaces(ptr, pc.interfaceRegistry)
+                }
+                </code>
+            end note
+            ProtoCodecMarshaler <|-- ProtoCodec
+            ProtoCodec ..> ProtoMarshaler
+
+            struct LegacyAmino #SkyBlue {
+
+            }
+        }
+
+        namespace simapp.params {
+            struct EncodingConfig #SkyBlue {
+                types.InterfaceRegistry InterfaceRegistry
+                ....
+                codec.Codec Codec
+                ....
+                client.TxConfig TxConfig
+                ....
+                codec.LegacyAmino Amino
+            }
+
+        }
+        simapp.params.EncodingConfig::InterfaceRegistry o-- codec.types.interfaceRegistry
+        simapp.params.EncodingConfig::TxConfig o-- x.auth.tx.config
+        simapp.params.EncodingConfig::Codec o--- codec.ProtoCodec 
+        simapp.params.EncodingConfig::Amino o-- codec.LegacyAmino
+
+        codec.ProtoCodec::interfaceRegistry o- codec.types.interfaceRegistry
+
+        baseapp.BaseApp::txDecoder .[#DarkGreen].> client.TxEncodingConfig::TxDecoder 
+    
+        'txDecoder的参数
+        x.auth.tx.DefaultTxDecoder ..[#Blue]..> codec.ProtoCodec : ProtoCodec 就是 txDecoder 的参数 cdc
+
+    }
+
+    namespace Ethermint {
+        namespace app {
+            struct EthermintApp {
+
+            }
+
+            CosmosSDK.baseapp.BaseApp <|--- EthermintApp : 嵌入BaseApp实现继承
+        }
+
+
+
+    }
+
+
+@enduml
+
+
+@startuml 2.txDecoder字段的初始化
+    title
+        txDecoder字段的初始化
+    end title
+
+    box Ethermint
+        participant main as "📦️<<package>> \n main \n 在 cmd/ethermintd 目录"
+        participant app as "📦️<<package>> \n app"
+        participant encoding as "📦️<<package>> \n encoding"
+        participant enccodec as "📦️<<package>> \n encoding.codec"
+        participant ethermintCryptoCodec as "📦️<<package>> \n crypto.codec"
+        participant ethermintTypes as "📦️<<package>> \n types"
+    end box
+
+    box CosmosSDK #SkyBlue
+        participant baseapp as "📦️<<package>> \n baseapp"
+        participant std as "📦️<<package>> \n std"
+        participant sdk as "📦️<<package>> \n types"
+        participant typesTx as "📦️<<package>> \n types.tx"
+        participant cryptocodec as "📦️<<package>> \n crypto.codec"
+        participant BasicManager as "🚧<<struct>> \n types.module.BasicManager"
+        participant interfaceRegistry as "🚧<<struct>> \n codec.types.interfaceRegistry"
+    end box
+
+    autonumber
+    autoactivate on
+    
+    -> main : main()
+
+        main -> main #DodgerBlue :  NewRootCmd()
+
+            main -> encoding : encodingConfig = encoding.MakeConfig(mb)
+                note over encoding 
+                    参数mb的取值： mb = app.ModuleBasics
+                    ----
+                    app.ModuleBasics 的类型为：
+                    type BasicManager map[string]AppModuleBasic
+                    它在定义时即初始化；
+                    ----
+                    <b><color:red>它管理所有模块的 AppModuleBasic 接口实例</color></b>
+                end note 
+
+                note over encoding 
+                    //<color:DarkGreen> amino = CosmosSDK.codec
+                    //<color:DarkGreen> tx = CosmosSDK.x.auth.tx
+                    //<color:DarkGreen> types = CosmosSDK.codec.types
+                    encodingConfig.InterfaceRegistry = types.NewInterfaceRegistry()
+                    encodingConfig.Codec = amino.NewProtoCodec(encodingConfig.InterfaceRegistry)
+                    encodingConfig.TxConfig = tx.NewTxConfig(encodingConfig.Codec, tx.DefaultSignModes)
+                    encodingConfig.Amino = amino.NewLegacyAmino()
+                end note 
+
+                encoding -> enccodec : enccodec.RegisterLegacyAminoCodec()， 参数：\
+                \n cdc = encodingConfig.Amino
+                return 
+
+                encoding -> BasicManager : mb.RegisterLegacyAminoCodec() ， 参数：\
+                \n cdc = encodingConfig.Amino
+                return
+                note over encoding #LightPink
+                    interfaceRegistry 在这里指向 codec.types.interfaceRegistry
+                    ----
+                    <code>
+                    type interfaceRegistry struct {
+                        interfaceNames map[string]reflect.Type // protoName -> reflect.Type
+                        interfaceImpls map[reflect.Type]interfaceMap // reflect.Type -> map(typeURL, reflect.Type)
+                        typeURLMap     map[string]reflect.Type // typeURL -> reflect.Type
+                    }
+                    </code>
+                end note
+                encoding -> enccodec : enccodec.RegisterInterfaces()， 参数：\
+                \n interfaceRegistry = encodingConfig.InterfaceRegistry
+                    group #LightPink "std.RegisterInterfaces(interfaceRegistry)的详细说明； 下面的两个调用是类似的， 都是填充 struct interfaceRegistry 的字段"
+                        enccodec -> std : std.RegisterInterfaces(interfaceRegistry)
+                            std -> sdk : sdk.RegisterInterfaces(interfaceRegistry) \
+                            \n sdk 即 cosmos-sdk的 package types 
+                                sdk -> interfaceRegistry : registry.RegisterInterface(MsgInterfaceProtoName, (*Msg)(nil))
+                                    note over interfaceRegistry
+                                        实参：
+                                        MsgInterfaceProtoName = "cosmos.base.v1beta1.Msg"
+                                        ----
+                                        RegisterInterface 的实现：
+                                        type = reflect.TypeOf(iface) // 通过反射得到 Msg 接口的类型
+                                        registry.interfaceNames[protoName] = typ // 记录映射关系
+                                    end note 
+                                return
+                            return
+                            
+                            std -> typesTx : txtypes.RegisterInterfaces(interfaceRegistry)
+                                typesTx -> interfaceRegistry : 多次注册
+                                note over typesTx, interfaceRegistry
+                                    <code>
+                                    // msgResponseInterfaceProtoName = "cosmos.tx.v1beta1.MsgResponse"
+                                    registry.RegisterInterface(msgResponseInterfaceProtoName, (*MsgResponse)(nil))
+                                    registry.RegisterInterface("cosmos.tx.v1beta1.Tx", (*sdk.Tx)(nil))
+                                    registry.RegisterImplementations((*sdk.Tx)(nil), &Tx{})
+                                    registry.RegisterInterface("cosmos.tx.v1beta1.TxExtensionOptionI", (*TxExtensionOptionI)(nil))
+                                    </code>
+                                end note 
+                                note over interfaceRegistry
+                                    RegisterImplementations 的实现：
+                                    ----
+                                    for impl in impls 
+                                        typeURL := "/" + proto.MessageName(impl) //取出消息名，合成 typeURL 
+                                        //将 typeURL -> impl对应的type加入映射
+                                        implType = reflect.TypeOf(impl)
+                                        imap = registry.interfaceImpls[ityp]
+                                        imap[typeURL] = implType
+                                        registry.typeURLMap[typeURL] = implType
+                                        registry.interfaceImpls[ityp] = imap
+                                end note 
+                                return
+                            return
+
+                            std -> cryptocodec : cryptocodec.RegisterInterfaces(interfaceRegistry)
+                                cryptocodec -> interfaceRegistry : 多次注册
+                                    note over cryptocodec, interfaceRegistry
+                                        <code>
+                                        var pk *cryptotypes.PubKey
+                                        registry.RegisterInterface("cosmos.crypto.PubKey", pk)
+                                        registry.RegisterImplementations(pk, &ed25519.PubKey{})
+                                        registry.RegisterImplementations(pk, &secp256k1.PubKey{})
+                                        registry.RegisterImplementations(pk, &multisig.LegacyAminoPubKey{})
+
+                                        var priv *cryptotypes.PrivKey
+                                        registry.RegisterInterface("cosmos.crypto.PrivKey", priv)
+                                        registry.RegisterImplementations(priv, &secp256k1.PrivKey{})
+                                        registry.RegisterImplementations(priv, &ed25519.PrivKey{}) //nolint
+                                        secp256r1.RegisterInterfaces(registry)
+                                        </code>
+                                    end note 
+                                return
+                            return
+                        end group
+                        enccodec -> ethermintCryptoCodec :cryptocodec.RegisterInterfaces(interfaceRegistry)
+                        return
+                        enccodec -> ethermintTypes : ethermint.RegisterInterfaces(interfaceRegistry)
+                        return
+                    return
+                return 
+
+                encoding -> BasicManager : mb.RegisterInterfaces(encodingConfig.InterfaceRegistry) 
+                    note over BasicManager #LightPink 
+                        <code>
+                        // 这会遍历所有定义在 app 中的模块
+                        for _, m := range bm {
+                            m.RegisterInterfaces(registry)
+                        }
+                        </code>
+                        ----
+                        以 EVM 模块的 RegisterInterfaces 为例：
+                        * 为 CosmosSDK.types.tx.TxExtensionOptionI 注册实现 ExtensionOptionsEthereumTx
+                        * 为 CosmosSDK.types.Msg 注册实现 MsgEthereumTx
+                        * 注册接口 "ethermint.evm.v1.TxData" -> TxData, 并注册实现 AccessListTx， LegacyTx， DynamicFeeTx
+                    end note 
+                return
+
+            return : appCreator.encCfg = encodingConfig
+            note over main
+                设置环境， 有许多操作略过
+                appCreator.newApp() 为 start 命令的回调执行函数
+                ----
+                type appCreator struct {
+                    encCfg params.EncodingConfig
+                }
+            end note 
+            main -> main : appCreator.newApp()
+
+                main -> app: app.NewEthermintApp(), 参数：\
+                \n encodingConfig = appCreator.encCfg
+
+                    app -> baseapp : baseapp.NewBaseApp()， 参数：\
+                    \n txDecoder = encodingConfig.TxConfig.TxDecoder()
+                        note over baseapp
+                            encodingConfig.TxConfig.TxDecoder() 
+                            函数的执行后，返回 txDecoder
+                            ----
+                            encodingConfig的类型为：
+                            simappparams.EncodingConfig
+                        end note 
+                    return
+
+                return
+
+            return 
+
+        return
+
+
+
+
+    return
+
+
+@enduml
+
+
+@startuml 3.tx的结构
+    title
+        tx的结构
+    end title
+
+    namespace CosmosSDK {
+        namespace codec.types {
+            struct Any #SpringGreen {
+                string TypeUrl; // 记录实际类型的URL;例如取值为 '/cosmos.bank.v1beta1.MsgSend'
+                ....
+                []byte Value; //编码后的数据
+                ....
+                cachedValue interface{}; //存放解码后的实际类型
+            }
+
+            interface UnpackInterfacesMessage {
+                UnpackInterfaces(unpacker AnyUnpacker)
+            }
+            interface AnyUnpacker {
+                UnpackAny(interface{}) error
+            }
+            UnpackInterfacesMessage::UnpackInterfaces .> AnyUnpacker
+        }
+
+        namespace types {
+            interface Msg {
+            }
+
+            interface Tx #LimeGreen {
+                + []Msg GetMsgs()
+            }
+            Tx -> Msg 
+            interface FeeTx {
+            }
+            Tx <|-- FeeTx
+
+            namespace tx {
+                interface TipTx {
+                }
+
+                struct TxBody {
+                    []codec.types.Any Messages
+                    ....
+                    string Memo
+                    ....
+                    uint64 TimeoutHeight
+                    ....
+                    []codec.types.Any ExtensionOptions
+                    ....
+                    []codec.types.Any NonCriticalExtensionOptions
+                }
+
+                struct AuthInfo {
+                    []SignerInfo SignerInfos; // struct SignerInfo
+                    ....
+                    Fee Fee; // struct Fee
+                    ....
+                    Tip Tip; // struct Tip
+                }
+
+                struct Tx <<定义在 types/tx/tx.pb.go 中>> #SkyBlue {
+                    TxBody Body
+                    ....
+                    AuthInfo AuthInfo
+                    ....
+                    [][]byte Signatures
+                }
+                Tx o- TxBody
+                Tx o--AuthInfo
+            }
+            FeeTx <|-- tx.TipTx
+            Tx <|-- tx.Tx
+        }
+
+        codec.types.Any ----o types.tx.TxBody
+        codec.types.UnpackInterfacesMessage <|----- types.tx.TxBody
+        codec.types.UnpackInterfacesMessage <|------ types.tx.AuthInfo
+        
+        namespace client {
+            interface TxBuilder {
+
+            }
+        }
+
+        namespace x.auth {
+            namespace tx {
+                interface ExtensionOptionsTxBuilder {
+
+                }
+
+                struct wrapper #SkyBlue {
+                    codec.Codec cdc
+                    ....
+                    tx.Tx tx
+                    ....
+                    []byte bodyBz
+                    ....
+                    []byte authInfoBz
+                    ....
+                    bool txBodyHasUnknownNonCriticals
+                }
+                note bottom of wrapper
+                    <code>
+                    GetMessage() {
+                        return tx.GetMsgs()
+                    }
+                    </code>
+                    ----
+                end note
+                ExtensionOptionsTxBuilder <|-- wrapper
+            }
+
+            namespace signing {
+                interface SigVerifiableTx {
+
+                }
+
+                interface Tx {
+
+                }
+
+                SigVerifiableTx <|-- Tx
+            }
+            signing.Tx <|-- tx.wrapper
+
+            namespace ante {
+                interface HasExtensionOptionsTx {
+
+                }
+            }
+            ante.HasExtensionOptionsTx <|-- tx.wrapper
+        }
+        client.TxBuilder <|-- x.auth.tx.ExtensionOptionsTxBuilder
+        types.tx.TipTx <|-- x.auth.tx.wrapper
+
+        x.auth.tx.wrapper::tx o-[#Blue]-> types.tx.Tx
+    }
+
+
+@enduml

@@ -1,0 +1,29 @@
+@startuml 1.共识数据结构
+
+namespace Tendermint {
+
+    namespace libs.service {
+        interface Service {
+            +start()
+            +stop()
+        }
+
+        struct BaseService {
+            Service impl;
+        }
+        BaseService::impl o--> Service
+    }
+
+    namespace consensus {
+
+        struct State {
+
+        }
+
+
+    }
+    libs.service.BaseService <|-- consensus.State
+}
+
+
+@enduml

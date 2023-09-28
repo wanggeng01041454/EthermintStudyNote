@@ -1,0 +1,56 @@
+@startuml 1.tendermint.rpc.server启动流程
+    title
+        tendermint(cometbft)的 rpc server启动流程
+        ethermint 代码流程
+    end title
+
+
+    box ethermint
+        participant "server/start.go::StartCmd" as StartCmd
+        participant "server/start.go::startInProcess" as startInProcess
+    end box 
+
+    box tendermint
+        participant "node/node.go::NewNode" as tmNewNode
+        participant "node/node.go::Node.OnStart" as tmNodeOnStart
+        participant "node/node.go::Node.startRPC" as tmNodeStartRPC
+    end box
+
+
+    autonumber
+    autoactivate on
+
+
+    -> StartCmd : 通过 cobra.Command 对象作为媒介 \
+    \n start 命令的 RUNE 函数被触发 \
+    \n 
+
+        StartCmd -> startInProcess : 执行start命令， \
+        \n 触发调用 startInProcess 函数 \
+        \n <color:red> 因为 with-tendermint 标记被设为 true，\
+        \n <color:red> 所以会走到调用 startInProcess函数的分支
+            
+            startInProcess -> tmNewNode : 调用 node.NewNode 函数 \
+            \n 创建一个 node.Node 对象
+            return : 返回 node.Node 对象
+
+            startInProcess -> tmNodeOnStart : 通过调用 Node.Start 函数，间接调用 Node.OnStart 函数 
+                
+                tmNodeOnStart -> tmNodeStartRPC: 调用 Node.startRPC 函数 
+                    note over tmNodeStartRPC
+                        配置并启动了 rpc 服务
+                        请求的路由处理函数为 rpc/core/routes.go 中的 Routes 定义
+                    end note
+                return
+                'tmNodeOnStart -> tmNodeStartRPC return
+
+            return
+            'startInProcess -> tmNodeOnStart return
+
+        return 
+        'StartCmd -> startInProcess return 
+
+    return
+    '-> StartCmd return
+
+@enduml

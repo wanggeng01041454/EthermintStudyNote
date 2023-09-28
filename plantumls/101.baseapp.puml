@@ -1,0 +1,50 @@
+@startuml 1.baseapp的类图
+    title 1.baseapp的类图
+
+    namespace Tendermint #SkyBlue {
+        namespace abci.types {
+            interface Application {
+                //<b><color:DarkGreen> ABCI 功能接口
+                CheckTx(RequestCheckTx) ResponseCheckTx
+                ....
+                BeginBlock(RequestBeginBlock) ResponseBeginBlock
+                ....
+                DeliverTx(RequestDeliverTx) ResponseDeliverTx
+                ....
+                EndBlock(RequestEndBlock) ResponseEndBlock
+                ....
+                Commit() ResponseCommit
+                ----
+            }
+        }
+    }
+
+    namespace CosmosSDK {
+        namespace baseapp {
+            struct BaseApp {
+                txDecoder // tx 解码函数指针
+                ....
+                appStore
+                ....
+                moduleRouter
+            }
+
+            Tendermint.abci.types.Application <|-- BaseApp
+        }
+    }
+
+    namespace Ethermint {
+        namespace app {
+            struct EthermintApp {
+                //<color:DarkGreen> substore 的 keys
+                ----
+                //<b><color:DarkGreen> 所有功能模块的 Keeper 对象
+                ----
+                mm *module.Manager
+            }
+
+            CosmosSDK.baseapp.BaseApp <|-- EthermintApp : 嵌入BaseApp实现继承
+        }
+    }
+
+@enduml

@@ -1,0 +1,53 @@
+@startuml 3.tendermint.rpc.core.Environment结构体.01
+    title
+        tendermint
+        rpc.core.Environment 结构体
+        [关注 CheckTx 的流程]
+    end title
+
+    package rpc.core {
+        struct Environment {
+            Mempool mempl.Mempool
+        }
+        note left
+            rpc/core/env.go 中
+        end note 
+    }
+    
+    package mempool {
+        interface Mempool {
+            CheckTx
+        }
+
+        package v1 {
+            struct TxMempool {
+                proxyAppConn proxy.AppConnMempool
+            }
+            note bottom
+                mempool/v1/mempool.go 中
+                ----
+                proxyAppConn 用于 abci 的交互
+            end note
+        }
+
+        package v0 {
+            struct CListMempool {
+                proxyAppConn proxy.AppConnMempool
+            }
+            note bottom
+                mempool/v0/clist_mempool.go
+                ----
+                proxyAppConn 用于 abci 的交互
+            end note 
+            
+        }
+    }
+
+    mempool.Mempool <|-- mempool.v1.TxMempool
+    mempool.Mempool <|-- mempool.v0.CListMempool
+
+    rpc.core.Environment::Mempool  o---  mempool.Mempool
+
+
+@enduml
+

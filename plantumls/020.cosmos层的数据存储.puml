@@ -1,0 +1,173 @@
+@startuml 1.CosmosSDK中的Store数据结构
+    title
+        1.CosmosSDK中的Store数据结构
+    end title
+
+    namespace Tendermint {
+        namespace abci {
+            struct Event {
+                string Type;
+                ....
+                []EventAttribute Attributes;
+            }
+        }
+    }
+
+    namespace CosmosSDK {
+        namespace baseapp {
+            struct BaseApp {
+                state* checkState;
+                ....
+                state* deliverState;
+
+            }
+            note left of BaseApp 
+                checkState 在 mode 取以下值时使用:
+                * runTxModeCheck
+                * runTxModeReCheck
+                * runTxModeSimulate
+                ====
+                deliverState 在 mode 取以下值时使用:
+                * runTxModeDeliver
+            end note 
+
+            struct state {
+                types.CacheMultiStore ms;
+                ....
+                types.Context ctx;
+            }
+
+            BaseApp --> state
+        }
+
+
+        namespace types {
+            struct Context {
+                MultiStore ms;
+                ....
+                EventManager* eventManager;
+            }
+
+            struct EventManager {
+                []Event events
+            }
+            Context::eventManager o- EventManager
+        }
+
+        namespace snapshots.types {
+            interface Snapshotter
+        }
+
+        namespace store {
+
+            namespace types {
+                interface CacheWrap {
+                    Write()
+                    ....
+                    CacheWrap CacheWrap(); //递归wrap
+                    ....
+                    CacheWrap CacheWrapWithTrace(w io.Writer, tc TraceContext)
+                }
+
+                interface CacheWrapper {
+                    CacheWrap CacheWrap()
+                    ....
+                    CacheWrap CacheWrapWithTrace(w io.Writer, tc TraceContext)
+                }
+                CacheWrapper ..> CacheWrap
+
+                note as StoreType 
+                    StoreType 的取值：
+                    ----
+                    * StoreTypeMulti = 0
+                    * StoreTypeDB = 1
+                    * StoreTypeIAVL = 2
+                    * StoreTypeTransient = 3
+                    * StoreTypeMemory = 4
+                    * StoreTypeSMT = 5
+                    * StoreTypePersistent = 6
+                end note 
+                interface Store {
+                    GetStoreType()
+                }
+                CacheWrapper <|-- Store
+                StoreType <-- Store
+
+                interface BasicKVStore {
+                    Get()
+                    Has()
+                    Set()
+                    Delete()
+                }
+
+
+                interface MultiStore #SkyBlue {
+                    CacheMultiStore CacheMultiStore()
+                }
+                Store <|-- MultiStore
+
+                interface CacheMultiStore {
+                    Write()
+                }
+                MultiStore <|-- CacheMultiStore
+                MultiStore ...> CacheMultiStore
+
+
+                interface Committer {
+                    CommitID Commit()
+                    ....
+                    CommitID LastCommitID()
+                }
+                interface CommitMultiStore {
+
+                }
+                MultiStore <|-- CommitMultiStore
+                Committer <|-- CommitMultiStore
+
+                interface KVStore {
+                    Iterator Iterator()
+                }
+                Store <|-- KVStore
+                BasicKVStore <|-- KVStore
+
+                interface CacheKVStore {
+                    Write()
+                }
+                KVStore <|-- CacheKVStore
+            }
+
+            namespace cachekv {
+                struct Store {
+                    sync.Mutex
+                    map[string]*cValue cache
+                    map[string]struct{} deleted
+                    map[string]struct{} unsortedCache
+                    internal.BTree sortedCache
+                    ....
+                    types.KVStore parent;
+                }
+
+            }
+            types.CacheKVStore <|--- cachekv.Store
+            cachekv.Store::parent o----> types.KVStore
+
+            namespace cachemulti {
+                struct Store {
+                    store.types.CacheKVStore db;
+                    ....
+                    map[types.StoreKey]types.CacheWrap stores;
+                    ....
+                    map[string]types.StoreKey keys;
+                }
+            }
+            types.CacheMultiStore <|-- cachemulti.Store
+            cachemulti.Store::db o---> cachekv.Store
+        }
+        snapshots.types.Snapshotter <|-- store.types.CommitMultiStore
+        baseapp.state::ctx o--- types.Context
+        types.Context::ms o---- store.cachemulti.Store
+
+    }
+
+
+@enduml

@@ -1,0 +1,451 @@
+@startuml 1.tx的流转流程
+    title
+        tx的流转流程
+    end title
+    
+    
+    actor cli
+
+    box Tendermint
+        participant rpcServer as "<<在node.Node.startRPC中注册>> \n rpc.core.Routes中 \n 注册的消息处理函数"
+
+
+        participant rpcClientLocal as "🚧<<struct>> \n rpc.client.local.Local"
+        participant rpcCore as "📦️<<package>> \n rpc.core"
+
+        participant CListMempool as "🚧<<struct>> \n mempool.v0.CListMempool"
+        participant appConnMempool as "🚧<<struct>> \n proxy.appConnMempool"
+        participant localClient as "🚧<<struct>> \n abci.abcicli.localClient"
+    end box
+
+    box CosmosSDK
+        participant clientContext as "📦️<<package>> \n client.Context"
+        participant baseapp as "🚧<<struct>> \n baseapp.BaseApp"
+    end box
+
+    box ethermint
+        participant PublicAPI as "🚧<<struct>> \n rpc.namespaces.ethereum.eth.PublicAPI"
+        participant rpcBackend as "🚧<<struct>> \n rpc.backend.Backend"
+    end box
+
+    autonumber
+    autoactivate on
+
+    ==ethermint 的实际入口==
+
+    
+    cli -> PublicAPI : [📨msg]PublicAPI.SendRawTransaction(data) \
+    \n data 是 eth_sendRawTransaction 传递的数据
+        PublicAPI -> rpcBackend : e.backend.SendRawTransaction(data) \
+        \n e 就是 PublicAPI 结构体 
+        
+            note over rpcBackend
+                tx.UnmarshalBinary(data)
+                将数据解码为以太坊的 tx
+                ----
+                对 tx 进行校验
+            end note
+            note over rpcBackend
+                ethereumTx := &evmtypes.MsgEthereumTx{}
+                ethereumTx.FromEthereumTx(tx)
+                cosmosTx := ethereumTx.BuildTx(...)
+                txBytes := b.clientCtx.TxConfig.TxEncoder()(cosmosTx) // b 就是 Backend
+                ----
+                构造 cosmos 的 evm 模块 message
+            end note 
+            note over rpcBackend #SkyBlue
+                // 从 evm 格式的事务中计算出 txHash
+                txHash := ethereumTx.AsTransaction().Hash()
+            end note
+
+            note over rpcBackend
+                syncCtx := b.clientCtx.WithBroadcastMode(flags.BroadcastSync)
+            end note 
+
+            rpcBackend -> clientContext : syncCtx.BroadcastTx(txBytes) 
+                clientContext -> clientContext : ctx.BroadcastTxSync(txBytes)
+                    note over clientContext
+                        node := ctx.GetNode()
+                    end note 
+                    clientContext -> rpcClientLocal : node.BroadcastTxSync(context.Background(), txBytes) 
+                        rpcClientLocal -> rpcCore : core.BroadcastTxAsync(c.ctx, tx) \
+                        \n c 就是 Local 结构体
+
+                            rpcCore -> CListMempool : env.Mempool.CheckTx(tx, callbackFunc)
+                                note over CListMempool
+                                    //初步检查：
+                                    mem.isFull(txSize)
+                                    mem.preCheck(tx)
+                                    ====
+                                    // 先将tx加入mempool中，并保证不出错
+                                    if !mem.cache.Push(tx)
+                                end note
+
+                                CListMempool -> appConnMempool : mem.proxyAppConn.CheckTxAsync(tx)
+
+                                    appConnMempool -> localClient : app.appConn.CheckTxAsync(req)
+                                        localClient -> baseapp : app.Application.CheckTx(req)
+                                            baseapp -> baseapp #Olive: BaseApp.runTx(mode=<size:20><color:red>runTxModeCheck</color></size>, tx) \
+                                            \n <color:DarkGreen>runTx定义在baseapp.go中</color>
+                                                baseapp -> baseapp : BaseApp.txDecoder(txBytes)
+                                                    note over baseapp #Green
+                                                        txDecoder 是 BaseApp 结构体的一个字段；
+                                                        它指向 x.auth.tx.DefaultTxDecoder() 返回的一个闭包函数
+                                                    end note
+                                                return : tx //types.Tx 
+
+                                                note over baseapp
+                                                    msgs = tx.GetMsgs()
+                                                    ----
+                                                    validateBasicTxMsgs(msgs)
+                                                end note 
+
+                                                alt "app.anteHandler != nil; 这个条件总是为真" 
+                                                    baseapp -> baseapp : BaseApp.anteHandler(ctx, tx, true)
+                                                        note over baseapp
+                                                            anteHandler 是 BaseApp 结构体的一个字段；
+                                                            它指向 ethermint.app.ante.NewAnteHandler() 返回的一个闭包函数
+                                                        end note
+                                                    return
+                                                end
+                                                
+                                                baseapp -> baseapp : BaseApp.runMsgs(runMsgCtx, msgs, mode)
+                                                    note over baseapp
+                                                        在 <size:20><color:red>runTxModeCheck</color></size> 模式下，
+                                                        只是调用这个函数，不会实际执行消息的处理逻辑。
+                                                    end note 
+                                                return
+                                            return 
+                                        return : res=abci.ResponseCheckTx
+
+                                        localClient -> localClient : reqRes=localClient.callback(req,res)
+                                        deactivate
+                                    return : return reqRes
+                                return : return reqRes
+
+                                CListMempool -> CListMempool : reqRes.SetCallback(callbackFunc)
+                                note over CListMempool
+                                    callbackFunc 是 CListrpcCore.reqResCb 
+                                    返回的闭包函数
+                                    ----
+                                    实际上，这个 callbackFunc 在这里直接被调用
+                                end note
+                                return
+                            return :
+
+            rpcCore -> rpcCore : 等待 callbackFunc 被调用
+            deactivate
+
+                        return
+                    return
+                return
+            return
+        return : txHash
+    return :
+
+    == 从rpcServer 开始，是另一个可能的入口 ==
+    autonumber
+
+    cli -> rpcServer : [📨msg]broadcast_tx_sync, tx
+        rpcServer -> rpcCore : BroadcastTxSync(ctx, tx)
+        return :
+    return :
+
+
+@enduml
+
+@startuml 2.txDecoder的详细流程
+    title
+        txDecoder的详细流程
+    end title
+
+    participant txDecoder as "🌀<<func>> \n txDecoder"
+    participant tx as "📦️<<package>> \n x.auth.tx"
+    participant unknownproto as "📦️<<package>> \n codec.unknownproto"
+    participant ProtoCodec as "🚧<<struct>> \n codec.ProtoCodec"
+    participant typesTx as "📦️<<package>> \n types.tx"
+    participant TxRaw as "🚧<<struct>> \n types.tx.TxRaw"
+    participant TxBody as "🚧<<struct>> \n types.tx.TxBody"
+    participant AuthInfo as "🚧<<struct>> \n types.tx.AuthInfo"
+    participant codectypes as "📦️<<package>> \n codec.types"
+    participant interfaceRegistry as "🚧<<struct>> \n codec.types.interfaceRegistry"
+
+
+    autonumber
+    autoactivate on
+
+    note over txDecoder, tx
+        txDecoder 是 x.auth.tx.DefaultTxDecoder() 返回的一个闭包函数
+        txDecoder 的函数参数是 txBytes []byte，表示编码为字节码的交易
+        ----
+        闭包传递的参数 cdc 是 struct codec.ProtoCodec
+    end note 
+    ====
+    txDecoder -> tx : rejectNonADR027TxRaw(txBytes)
+    return
+
+    note over txDecoder
+        var raw tx.TxRaw
+    end note
+
+    txDecoder -> unknownproto : unknownproto.RejectUnknownFieldsStrict
+    return
+
+    txDecoder -> ProtoCodec : cdc.Unmarshal(txBytes, &raw)
+        ProtoCodec -> TxRaw : TxRaw.Unmarshal(txBytes)
+            note over TxRaw
+                解码后，TxRaw 的各字段被填充，
+                但是TxRaw的各字段仍旧是 []byte 类型
+                ====
+                TxRaw的3个字段：
+                BodyBytes []byte
+                ....
+                AuthInfoBytes []byte
+                ....
+                Signatures [][]byte
+            end note
+        return
+        ProtoCodec -> codectypes : types.UnpackInterfaces(ptr, pc.interfaceRegistry)
+            note over codectypes
+                因为没有 TxRaw 相关的注册数据结构，
+                所以这里什么都没有做
+            end note 
+        return 
+    return
+
+    note over txDecoder
+        var body tx.TxBody
+    end note
+
+    txDecoder -> unknownproto : unknownproto.RejectUnknownFields(raw.BodyBytes, &body)
+    return
+
+    txDecoder -> ProtoCodec : cdc.Unmarshal(raw.BodyBytes, &body)
+        ProtoCodec -> TxBody : TxBody.Unmarshal(raw.BodyBytes)
+            note over TxBody
+                解码后，TxBody 的各字段被填充，
+            end note
+        return
+        ProtoCodec -> codectypes : types.UnpackInterfaces(body, ProtoCodec.interfaceRegistry)
+            note over codectypes
+                将 body 强转为 UnpackInterfacesMessage 接口
+            end note
+            codectypes -> TxBody : msg.UnpackInterfaces(unpacker)
+                note over TxBody
+                    msg 是强转类型后的变量名；
+                    unpacker 是 codec.ProtoCodec.interfaceRegistry
+                end note 
+                TxBody -> typesTx :UnpackInterfaces(unpacker, m.Messages) //m就是TxBody
+                    loop "m.Messages是个数组，遍历每个元素"
+                        note over typesTx
+                            var msg sdk.Msg
+                        end note
+                        typesTx -> interfaceRegistry : unpacker.UnpackAny(any, &msg)
+                            note over interfaceRegistry
+                                rt 代表 msg 的类型
+                                imap := registry.interfaceImpls[rt] // 找到接口类型的实现映射
+                                typ := imap[any.TypeUrl] //根据TypeURL查找实现类型；
+                                // TypeUrl 作为字符串编码在了 消息中，进行初步界面时即可获得
+                                msg = reflect.New(typ.Elem()).Interface().(proto.Message) // 使用反射构造消息
+                                proto.Unmarshal(any.Value, msg) // 使用 proto 解码消息
+                            end note
+                            interfaceRegistry -> typesTx : <color:red><size:18>递归调用 UnpackInterfaces(msg, registry)</size></color>
+                            return
+                        return
+                    end loop 
+                return
+            return
+        return
+    return
+
+    note over txDecoder
+        var authInfo tx.AuthInfo
+    end note
+
+    txDecoder -> unknownproto : unknownproto.RejectUnknownFieldsStrict(raw.AuthInfoBytes, &authInfo)
+    return
+
+    txDecoder -> ProtoCodec : cdc.Unmarshal(raw.AuthInfoBytes, &authInfo)
+        ProtoCodec -> AuthInfo : AuthInfo.Unmarshal(raw.AuthInfoBytes)
+            note over AuthInfo
+                解码后，AuthInfo 的各字段被填充，
+            end note
+        return
+
+        ProtoCodec -> codectypes : types.UnpackInterfaces(authInfo, ProtoCodec.interfaceRegistry)
+            note over codectypes
+                如果有独立的 SignerInfo 数据，
+                types.UnpackInterfaces() 会递归解码 SignerInfo 字段，
+                解码过程中，会调用到各个业务模块的解码逻辑。
+                <color:red>但是，evm模块中，数据是和签名混合在一起的，所以不会用到这个逻辑</color>
+            end note
+        return       
+    return
+
+    note over txDecoder
+        组装数据，返回
+    end note
+@enduml
+
+@startuml 3.BaseApp.runMsg的详细流程
+    title 
+        BaseApp.runMsg的详细流程
+    end title
+
+    box cosmos
+        participant BaseApp as "🚧<<struct>> baseapp.BaseApp"
+        participant EventManager as "🚧<<struct>> types.EventManager"
+        participant lambda_1 as "🌀<<func>> \n baseapp.MsgServiceRouter.RegisterService \n 返回的闭包函数\n 闭包函数1"
+        participant lambda_2 as "🌀<<func>> \n 闭包函数1中定义的 interceptor 闭包函数\n 闭包函数2"
+    end box 
+
+    box ethermint
+        participant pb_func as "🌀<<func>> \n pb自动生成的处理函数 \n x.evm._Msg_EthereumTx_Handler"
+        participant lambda_3 as "🌀<<func>> \n x.evm._Msg_EthereumTx_Handler中生成的handler闭包函数"
+        participant evmkeeper as "🚧<<struct>> x.evm.keeper.Keeper"
+    end box
+
+
+    autonumber
+    autoactivate on
+
+    -> BaseApp : BaseApp.runMsgs(runMsgCtx, msgs, mode)
+        note over BaseApp
+            runMsgCtx 是一个结构体，包含了一些上下文信息，在进入本函数前，runMsgCtx已经
+            是一个和 mode 有关的结构了；
+            ----
+            msgs 是 []sdk.Msg 类型的数组
+            ----
+            mode 是 runTxMode 类型的变量，表示执行模式，mode取值有：
+            * runTxModeCheck // 校验
+            * runTxModeReCheck // 在commit后，对pending的事务再校验
+            * runTxModeSimulate // 模拟执行 <color:red>[系统未使用这种模式]</color>
+            * runTxModeDeliver // 落地存储并执行事务
+        end note
+
+        loop 对每个msg进行处理
+            alt 只处理 mode 为 runTxModeSimulate runTxModeDeliver 的场景
+                note over BaseApp
+                    从BaseApp.moduleRouter.msgServiceRouter 中，根据msg的TypeUrl
+                    找到对应的 MsgServiceHandler 
+                end note 
+                note over BaseApp #LimeGreen
+                BaseApp.moduleRouter.msgServiceRouter 的初始化：
+                ====
+                <code>
+                // RegisterServices registers all module services
+                // 这个 Manager 就是 EthermintApp 中的 ModuleManager
+                func (m *Manager) RegisterServices(cfg Configurator) {
+                    for _, module := range m.Modules {
+                        // RegisterServices(cfg) 是
+                        module.RegisterServices(cfg)
+                    }
+                }
+                </code>
+                end note 
+                BaseApp -> lambda_1 :
+                    note over lambda_1
+                        闭包函数的参数是 ctx sdk.Context, msg sdk.Msg
+                        闭包函数的返回值是 sdk.Result
+                        ----
+                        MsgServiceHandler 是 baseapp.RegisterService返回的一个闭包函数，
+                        在这个闭包函数中，会调用到业务模块的处理逻辑;
+                    end note
+
+                    
+                    lambda_1 -> pb_func : 参数中包含一个 interceptor 函数指针
+                        note over pb_func 
+                            构造一个闭包函数, handler
+                        end note 
+
+                        pb_func -> lambda_2 : 参数中包含刚才构造的handler
+                            lambda_2 -> lambda_3 : 
+                            note over lambda_3
+                                参数是 : ctx context.Context, req interface{}
+                                req 可以被强转为 MsgEthereumTx 类型
+                                ....
+                                因为在消息解码时已完成了实际的类型转换
+                            end note 
+
+                            lambda_3 -> evmkeeper : Keeper.EthereumTx
+                                evmkeeper -> evmkeeper : Keeper.ApplyTransaction(ctx, msg)
+                                    '
+                                return: MsgEthereumTxResponse response 
+
+                                note over evmkeeper
+                                    事务本身的信息(ehterumTxHash等)
+                                    事务执行后所得的Log(合约中抛出的event)
+                                    一并被封装到一个 abci.Event 数组中。
+                                end note
+
+                                evmkeeper -> EventManager : EmitEvents.EmitEvents(events)
+                                    note over EventManager
+                                        EventManager 是 contex 中的一个字段
+                                        ----
+                                        EmitEvents函数实现：
+                                        <code>
+                                            // 只是记录events
+                                            em.events = em.events.AppendEvents(events)
+                                        </code>
+                                    end note
+                                return
+                            return
+
+                            return : interface{} //实际上是 MsgEthereumTxResponse
+
+                        return : interface{} //实际上是 MsgEthereumTxResponse
+                    return 
+
+
+                    note over lambda_1 
+                        在闭包函数中，调用 WrapServiceResult 构造执行结果
+                        sdk.Result 结构体
+                        Data： MsgEthereumTxResponse对象进行proto编码；
+                        Events： 从contex.EventManager中取出events
+                        MsgResponses: MsgEthereumTxResponse 转为 any 接口
+                    end note 
+
+                return msgEvents = sdk.Result
+
+            note over BaseApp
+                <code>
+                msgEvents := sdk.Events{
+                    // sdk.EventTypeMessage = "message"
+                    // sdk.AttributeKeyAction = "action"
+                    // eventMsgName = "/ethermint.evm.v1.MsgEthereumTx"
+                    sdk.NewEvent(sdk.EventTypeMessage, sdk.NewAttribute(sdk.AttributeKeyAction, eventMsgName)),
+                }
+                msgEvents = msgEvents.AppendEvents(msgResult.GetEvents())
+                events = events.AppendEvents(msgEvents) // 收集所有消息执行的 event
+                </code>
+                ----
+                <code>
+                msgResponse := msgResult.MsgResponses[0] // 就是 MsgEthereumTxResponse
+                msgResponses = append(msgResponses, msgResponse) // 收集所有消息执行结果
+                </code>
+                ----
+                <code>
+                msgLogs = append(msgLogs, sdk.NewABCIMessageLog(uint32(i), msgResult.Log, msgEvents))
+                // 就是对 msgEvents 进行了一下封装， 将 msgEvents 转成了字符串
+                </code>
+                ----
+                <code>
+                data = makeABCIData(msgResponses)
+                </code>
+            end note 
+            end 
+        end
+        note over BaseApp 
+            <code>
+                return &sdk.Result{
+                    Data:         data,
+                    Log:          strings.TrimSpace(msgLogs.String()),
+                    Events:       events.ToABCIEvents(),
+                    MsgResponses: msgResponses,
+                }
+            </code>
+        end note 
+    return sdk.Result
+
+@enduml
+

@@ -1,0 +1,79 @@
+
+
+@startuml 1.模块接口定义
+    title
+        module-interface
+        模块需要实现的接口
+    end title
+
+    namespace CosmosSDK.types.module {
+        interface AppModuleBasic {
+            Name()
+            ....
+            RegisterLegacyAminoCodec()
+            ....
+            RegisterInterfaces()
+            ....
+            DefaultGenesis()
+            ....
+            ValidateGenesis()
+            ----
+            RegisterGRPCGatewayRoutes()
+            ....
+            GetTxCmd()
+            ....
+            GetQueryCmd
+        }
+        note right of AppModuleBasic
+            <color:red>【必要条件】模块实现该接口的方法时，不依赖于其它的模块</color>
+
+            ----
+            所有模块的 AppModuleBasic 接口，都由 BasicManager 管理
+        end note 
+
+        interface AppModuleGenesis {
+            InitGenesis()
+            ....
+            ExportGenesis()
+        }
+        note right of AppModuleGenesis
+            定义仅用于创世（Genesis）场景的模块功能 接口
+        end note
+
+        interface AppModule {
+            RegisterInvariants()
+            ....
+            RegisterServices()
+            ....
+            uint64 ConsensusVersion()
+        }
+        note right of AppModule
+            定义普通的模块接口
+            实现这些接口方法时，可以依赖于其它模块
+        end note
+
+        AppModuleBasic <|-- AppModuleGenesis
+        AppModuleGenesis <|-- AppModule
+
+        package "模块可选实现的接口" {
+            interface BeginBlockAppModule {
+                BeginBlock()
+            }
+            note bottom of BeginBlockAppModule
+                在ABCI接口的 BeginBlock 上下文中调用该接口方法
+            end note
+
+            interface EndBlockAppModule {
+                EndBlock()
+            }
+            note bottom of EndBlockAppModule
+                在ABCI接口的 EndBlock 上下文中调用该接口方法
+            end note
+        }
+
+        AppModule <|-- BeginBlockAppModule
+        AppModule <|-- EndBlockAppModule
+    }
+
+
+@enduml

@@ -1,0 +1,254 @@
+@startuml 1.abci接口类图
+    title
+        abci接口的类图
+    end title
+
+    namespace tendermint {
+
+        namespace libs.service {
+            interface Service {
+                +Start() error
+                +Stop() error
+            }
+            note left
+                libs/service/service.go
+            end note 
+
+            struct BaseService {
+                impl Service
+            }
+        }
+
+        namespace abci #SkyBlue {
+            namespace abcicli {
+                interface Client {
+
+                }
+                note left
+                    abci/client/client.go
+                end note 
+
+                struct localClient {
+                    Application types.Application
+                }
+
+                Client <|-- localClient
+                
+            }
+
+            namespace types {
+                interface Application {
+
+                }
+                note left
+                    abci/types/application.go
+                end note
+            }
+
+            abcicli.localClient o- types.Application
+        }
+
+        namespace proxy {
+            
+            interface AppConnConsensus {
+
+            }
+            struct appConnConsensus {
+                appConn abcicli.Client
+            }
+            AppConnConsensus <|-- appConnConsensus
+
+
+            interface AppConnMempool {
+
+            }
+            struct appConnMempool {
+                appConn abcicli.Client
+            }
+            AppConnMempool <|-- appConnMempool
+
+            interface AppConnQuery {
+
+            }
+            struct appConnQuery {
+                appConn abcicli.Client
+            }
+            AppConnQuery <|-- appConnQuery
+
+            interface AppConnSnapshot {
+
+            }
+            struct appConnSnapshot {
+                appConn abcicli.Client
+            }
+            AppConnSnapshot <|-- appConnSnapshot
+
+            interface ClientCreator #LimeGreen {
+                NewABCIClient()
+            }
+            note bottom
+                实际中使用的 ClientCreator 是 localClientCreator
+                它的 NewABCIClient() 函数返回的实现为：
+                ----
+                <code>
+                return abcicli.NewLocalClient(l.mtx, l.app), nil
+                </code>
+            end note 
+
+            interface AppConns {
+                Mempool() AppConnMempool
+                ....
+                Consensus() AppConnConsensus
+                ....
+                Query() AppConnQuery
+                ....
+                Snapshot() AppConnSnapshot	
+            }
+            struct multiAppConn <<关键对象>> #HotPink {
+
+            }
+            note left of multiAppConn
+                在 node.NewNode 函数中被创建
+                <code>
+                proxyApp, err := createAndStartProxyAppConns(clientCreator, logger)
+                </code>
+                ----
+                之后，proxyApp 被存放在 node.Node 的 proxyApp 字段中
+            end note 
+            AppConns <|-- multiAppConn
+
+            multiAppConn o-- AppConnConsensus
+            multiAppConn o-- AppConnMempool
+            multiAppConn o-- AppConnQuery
+            multiAppConn o-- AppConnSnapshot
+
+            multiAppConn o-- ClientCreator : 用于创建 Client 对象
+        }
+
+        'tendermint 内部
+        libs.service.Service <|--- abci.abcicli.Client
+        libs.service.BaseService <|--- abci.abcicli.localClient
+
+        libs.service.Service <|--- proxy.AppConns
+        libs.service.BaseService <|--- proxy.multiAppConn
+
+        proxy.appConnConsensus o---- abci.abcicli.Client
+        proxy.appConnMempool o---- abci.abcicli.Client
+        proxy.appConnQuery o---- abci.abcicli.Client
+        proxy.appConnSnapshot o---- abci.abcicli.Client
+    }
+
+
+    namespace cosmossdk {
+        namespace baseapp {
+            struct BaseApp {
+
+            }
+        }
+    }
+
+    namespace ethermint {
+        namespace app {
+            struct EthermintApp {
+                
+            }
+        }
+    }
+
+    tendermint.abci.types.Application <|---- cosmossdk.baseapp.BaseApp
+    cosmossdk.baseapp.BaseApp <|-- ethermint.app.EthermintApp
+
+@enduml
+
+@startuml 2.abci接口初始化流程
+    title 
+        abci接口初始化流程
+    end title
+
+    box ethermint
+        participant "server/start.go::StartCmd" as StartCmd
+        participant "server/start.go::startInProcess" as startInProcess
+    end box 
+
+    box tendermint
+        participant "node/node.go::NewNode" as tmNewNode
+        participant "node/node.go\n::createAndStartProxyAppConns" as createAndStartProxyAppConns
+        participant "proxy/multi_app_conn.go\n::NewAppConns" as NewAppConns
+        participant "proxy/multi_app_conn.go\n::multiAppConn.OnStart" as multiAppConnOnStart
+    end box
+
+
+    autonumber
+    autoactivate on
+
+    StartCmd -> startInProcess : \
+    \n <color:red> 因为 with-tendermint 标记被设为 true，\
+    \n <color:red> 所以会走到调用 startInProcess函数的分支
+
+        note over startInProcess
+            startInProcess 函数中：
+            <code>
+            app := appCreator(ctx.Logger, db, traceWriter, ctx.Viper)
+            </code>
+        end note 
+
+        note over StartCmd
+            appCreator 作为函数参数传入 StartCmd, 再传入了 startInProcess；
+            appCreator 的创建一直可以追溯到 cmd/ethermintd/root.go 中，
+            appCreator = appCreator.newApp 
+            其中 appCreator.newApp 函数返回一个 app.EthermintApp 对象
+        end note 
+
+        startInProcess -> tmNewNode : 调用 node.NewNode 函数 \
+        \n 参数 clientCreator = proxy.NewLocalClientCreator(app)
+
+            tmNewNode -> createAndStartProxyAppConns : 调用 createAndStartProxyAppConns 函数 \
+            \n 透传这个参数： clientCreator = clientCreator
+
+                note over createAndStartProxyAppConns
+                    proxy.NewLocalClientCreator(app) 函数的内容：
+                    ----
+                    <code>
+                    func NewLocalClientCreator(app types.Application) ClientCreator {
+                        return &localClientCreator{
+                            mtx: new(cmtsync.Mutex),
+                            app: app,
+                        }
+                    }
+                    </code>
+                end note
+
+                createAndStartProxyAppConns -> NewAppConns : 调用 NewAppConns 函数 
+
+                    NewAppConns -> multiAppConnOnStart : 通过调用 proxy.AppConns.Start 函数，\
+                    \n 触发 proxy.AppConns.OnStart 函数的调用
+
+                    note over multiAppConnOnStart
+                        使用同一个 abcicli.Client 对象创建4类 AppConnXXX 对象
+                    end note
+
+                    return
+                    ' NewAppConns -> multiAppConnOnStart return
+
+                return : 返回 proxy.AppConns 接口，\
+                \n 实际为 proxy.multiAppConn 对象
+
+            return proxyApp
+            ' tmNewNode -> createAndStartProxyAppConns return
+
+            tmNewNode -> tmNewNode : 所得的 proxyApp 被存放在 \
+            \n node.Node 的 proxyApp 字段中
+            deactivate
+
+        return : 返回 tendermint.Node 对象
+        ' startInProcess -> tmNewNode return
+
+    return
+    ' StartCmd -> startInProcess return
+
+
+
+@enduml
+
+
+

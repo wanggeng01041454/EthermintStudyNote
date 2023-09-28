@@ -1,0 +1,48 @@
+
+@startuml 2.tendermint.node.Node的继承关系图
+    title
+        tendermint.Node 的继承关系图
+        Service 启动部分
+    end title
+
+    namespace node {
+        struct Node {
+
+        }
+        note left
+            impl 字段指向了 Node 的实例
+            ----
+            Node 重点重载了 OnStart 函数、OnStop 函数
+        end note 
+    }
+
+    namespace service {
+        struct BaseService {
+            impl Service // 指向实现了Service的类
+        }
+        note left
+            BaseService 既实现了 Service 接口
+            又集成了 Service 接口，来指向实际的实现类
+            ----
+            BaseService 实现的 Start() 函数 调用 impl.OnStart() 函数
+        end note 
+
+        interface Service {
+            Start() error
+            ....
+            OnStart() error
+            ----
+            Stop() error
+            ....
+            OnStop()
+        }
+    }
+
+
+    service.BaseService <|-- node.Node
+    service.Service <|-- node.Node
+    
+    service.Service <|-- service.BaseService 
+
+@enduml
+

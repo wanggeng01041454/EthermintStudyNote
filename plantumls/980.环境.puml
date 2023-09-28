@@ -1,0 +1,26 @@
+@startuml 单机调试环境
+    title 
+        单机（solo节点）测试环境
+    end title
+
+    rectangle dev [
+        <size:20>开发环境 + 合约测试客户端
+        ====
+        IP: 127.0.0.1
+    ]
+
+    rectangle solo [
+        <size:20>solo节点
+        ====
+        IP: 127.0.0.1
+        rpc端口: 8545
+        ----
+        工作目录: 
+        /tmp/solo_test
+        ----
+        chain-id: 9955
+    ]
+
+    dev - solo
+
+@enduml
