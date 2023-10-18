@@ -1,10 +1,20 @@
-@startuml 1.tx的流转流程
+@startuml 1.tx的流转流程-1
     title
-        tx的流转流程
+        tx的流转流程-CheckTx阶段
     end title
     
     
     actor cli
+
+    box ethermint
+        participant PublicAPI as "🚧<<struct>> \n rpc.namespaces.ethereum.eth.PublicAPI"
+        participant rpcBackend as "🚧<<struct>> \n rpc.backend.Backend"
+    end box
+
+    box CosmosSDK
+        participant clientContext as "📦️<<package>> \n client.Context"
+        participant baseapp as "🚧<<struct>> \n baseapp.BaseApp"
+    end box
 
     box Tendermint
         participant rpcServer as "<<在node.Node.startRPC中注册>> \n rpc.core.Routes中 \n 注册的消息处理函数"
@@ -16,16 +26,6 @@
         participant CListMempool as "🚧<<struct>> \n mempool.v0.CListMempool"
         participant appConnMempool as "🚧<<struct>> \n proxy.appConnMempool"
         participant localClient as "🚧<<struct>> \n abci.abcicli.localClient"
-    end box
-
-    box CosmosSDK
-        participant clientContext as "📦️<<package>> \n client.Context"
-        participant baseapp as "🚧<<struct>> \n baseapp.BaseApp"
-    end box
-
-    box ethermint
-        participant PublicAPI as "🚧<<struct>> \n rpc.namespaces.ethereum.eth.PublicAPI"
-        participant rpcBackend as "🚧<<struct>> \n rpc.backend.Backend"
     end box
 
     autonumber
@@ -63,7 +63,7 @@
             end note 
 
             rpcBackend -> clientContext : syncCtx.BroadcastTx(txBytes) 
-                clientContext -> clientContext : ctx.BroadcastTxSync(txBytes)
+                clientContext -> clientContext #SkyBlue : ctx.BroadcastTxSync(txBytes)
                     note over clientContext
                         node := ctx.GetNode()
                     end note 
@@ -77,8 +77,12 @@
                                     mem.isFull(txSize)
                                     mem.preCheck(tx)
                                     ====
-                                    // 先将tx加入mempool中，并保证不出错
-                                    if !mem.cache.Push(tx)
+                                    // 先将tx-hash加入mempool-lrucache中
+                                    // 并保证不出错
+                                    if !mem.cache.Push(tx) {
+                                        ...
+                                        return 
+                                    }
                                 end note
 
                                 CListMempool -> appConnMempool : mem.proxyAppConn.CheckTxAsync(tx)
@@ -124,11 +128,14 @@
                                 return : return reqRes
 
                                 CListMempool -> CListMempool : reqRes.SetCallback(callbackFunc)
-                                note over CListMempool
-                                    callbackFunc 是 CListrpcCore.reqResCb 
+                                note over CListMempool #FB595D
+                                    callbackFunc 是 CListMempool.reqResCb 
                                     返回的闭包函数
                                     ----
                                     实际上，这个 callbackFunc 在这里直接被调用
+                                    ====
+                                    在这个callback函数中，如果ABCI接口返回结果没有错误，
+                                    tx将被添加到mempool中
                                 end note
                                 return
                             return :
@@ -154,7 +161,621 @@
 
 @enduml
 
-@startuml 2.txDecoder的详细流程
+@startuml 2.tx的流转流程-2
+    title
+        tx的流转流程-DeliverTx阶段
+    end title
+
+    box Tendermint
+        participant ConsensusState as "🚧<<struct>> \n consensus.State"
+        participant csVote as "🚧<<struct>> \n consensus.types.HeightVoteSet"
+        participant WAL as "🚧<<struct>> \n consensus.BaseWAL"
+        participant EventBus as "🚧<<struct>> \n types.EventBus"
+        participant eventSwitch as "🚧<<struct>> \n libs.events.eventSwitch"
+        participant BlockExecutor as "🚧<<struct>> \n state.BlockExecutor"
+        participant state as "📦️<<package>> \n state"
+        participant dbStore as "🚧<<struct>> \n state.dbStore"
+        participant BlockStore as "🚧<<struct>> \n store.BlockStore"
+
+        participant CListMempool as "🚧<<struct>> \n mempool.v0.CListMempool"
+
+        participant appConnConsensus as "🚧<<struct>> \n proxy.appConnConsensus"
+        participant localClient as "🚧<<struct>> \n abci.abcicli.localClient"
+    end box
+
+    box CosmosSDK
+        participant clientContext as "📦️<<package>> \n client.Context"
+        participant baseapp as "🚧<<struct>> \n baseapp.BaseApp"
+
+        participant ModuleManager as "🚧<<struct>> \n types.module.Manager"
+
+        participant CacheMultiStore as "🚧<<struct>> \n store.cachemulti.Store"
+        participant RootMultiStore as "🚧<<struct>> \n store.rootmulti.Store"
+    end box
+
+    box ethermint
+        participant EthermintApp as "🚧<<struct>> \n app.EthermintApp"
+    end box
+
+    autonumber
+    autoactivate on
+
+    ==在一个协程里工作，收到消息即做如下的处理==
+    -> ConsensusState : cs.handleMsg(mi)， // var mi msgInfo
+        note over ConsensusState
+            消息的种类包括：
+            * ProposalMessage; 
+            * BlockPartMessage;
+            * VoteMessage
+            ====
+            <color:red>我们仅关注对 VoteMessage 的处理</color>
+        end note
+
+        alt "消息类型为 VoteMessage "
+            ConsensusState -> ConsensusState #Chocolate : cs.tryAddVote(msg.Vote, peerID)
+                ConsensusState -> ConsensusState #Cyan : cs.addVote(vote, peerID)
+                    note over ConsensusState
+                        输出日志信息“adding vote”
+                    end note 
+                    note over ConsensusState
+                        <code>
+                        if vote.Height+1 == cs.Height && vote.Type == cmtproto.PrecommitType{...}
+                        </code>
+                        处理 针对前一个区块的 precommit， //<color:red><b>有疑问？？？
+                    end note 
+
+                    ConsensusState -> csVote : cs.Votes.AddVote(vote, peerID)
+                    return
+
+                    ConsensusState -> EventBus : cs.eventBus.PublishEventVote(types.EventDataVote{Vote: vote})
+                    return
+
+                    ConsensusState -> eventSwitch : cs.evsw.FireEvent(types.EventVote, vote) //types.EventVote = "Vote" 
+                    return
+
+                    note over ConsensusState
+                        接下来根据 vote.Type 做不同的处理
+                        ----
+                        vote.Type的不同取值：
+                        * PrevoteType
+                        * PrecommitType
+                        ====
+                        只关注 PrecommitType 的处理
+                        根据状态迁移，收到 2/3+ 的 precommit 后，会进入 Commit 阶段
+                    end note 
+                    alt "vote.Type = PrecommitType"
+                        note over ConsensusState
+                            <code>
+                            // 取出precommits集合
+                            precommits := cs.Votes.Precommits(vote.Round)
+                            // 判断是否有2/3+的precommit
+                            blockID, ok := precommits.TwoThirdsMajority()
+                            </code>
+                        end note
+                        alt "ok=true, 收到了2/3+节点的Precommit信息"
+                            ConsensusState -> ConsensusState #DarkGreen :cs.enterCommit(height, vote.Round)
+                                note over ConsensusState
+                                    在 enterCommit 的 defer 函数中，
+                                    会调用 cs.tryFinalizeCommit(height)
+                                    ----
+                                    <code>
+                                    cs.CommitTime = cmttime.Now()
+                                    cs.newStep()
+                                    cs.tryFinalizeCommit(height)
+                                    </code>
+                                end note 
+                                ConsensusState -> ConsensusState #FF00FF: cs.tryFinalizeCommit(height)
+                                    note over ConsensusState
+                                        一些检查工作
+                                    end note 
+                                    ConsensusState -> ConsensusState #7FFF00: cs.finalizeCommit(height)
+                                        note over ConsensusState
+                                            block = cs.ProposalBlock
+                                        end note 
+
+                                        ConsensusState -> BlockExecutor : cs.blockExec.ValidateBlock(cs.state, block)
+                                        return
+
+                                        ConsensusState -> BlockStore : ⭐️cs.blockStore.SaveBlock(block, blockParts, seenCommit) <size:18><color:DarkGreen><b>//存储区块
+                                        return
+                                        
+                                        ConsensusState -> WAL : cs.wal.WriteSync()
+                                        return
+
+                                        ConsensusState -> BlockExecutor :cs.blockExec.ApplyBlock(stateCopy, blockID, block)
+                                            BlockExecutor -> state : execBlockOnProxyApp(, blockExec.proxyApp, block, blockExec.store,)
+                                                note over state
+                                                    在 execBlockOnProxyApp 函数中
+                                                    ====
+                                                    定义闭包回调函数 proxyCb, 用于处理每个事务的执行结果
+                                                    在 proxyCb 中收集了每个事务的执行结果
+                                                end note 
+                                                
+                                                state -> appConnConsensus : proxyAppConn.SetResponseCallback(proxyCb)
+                                                return
+
+                                                state -> appConnConsensus : proxyAppConn.BeginBlockSync(...)
+                                                    appConnConsensus -> localClient :app.appConn.BeginBlockSync(req)
+                                                        localClient -> baseapp : app.Application.BeginBlock(req)
+                                                            note over baseapp
+                                                                // 在cosmos层做校验
+                                                                app.validateHeight(req) 
+                                                                ====
+                                                                // 设置 deliverState 的 context
+                                                                app.deliverState.ctx 
+                                                            end note 
+                                                            baseapp -> EthermintApp : app.beginBlocker(app.deliverState.ctx, req)
+                                                                note over baseapp, EthermintApp
+                                                                    通过在初始化时调用 
+                                                                    app.SetBeginBlocker(app.BeginBlocker)
+                                                                    将 baseapp.BeginBlocker 设置为 EthermintApp.BeginBlocker
+                                                                end note 
+                                                                note over EthermintApp
+                                                                    执行上下文在 EthermintApp.BeginBlocker 函数中
+                                                                end note
+
+                                                                EthermintApp -> ModuleManager : app.mm.BeginBlock(ctx, req)
+                                                                    note over ModuleManager
+                                                                        <color:DarkGreen>按 OrderBeginBlockers 中定义的顺序，依次调用每个模块的 BeginBlock 函数
+                                                                        ----
+                                                                        <code>
+                                                                        for _, moduleName := range m.OrderBeginBlockers {
+                                                                            module, ok := m.Modules[moduleName].(BeginBlockAppModule)
+                                                                            if ok {
+                                                                                module.BeginBlock(ctx, req)
+                                                                            }
+                                                                        }
+                                                                        </code>
+                                                                    end note 
+                                                                    note over ModuleManager
+                                                                        从context中取出event数据作为返回值：
+                                                                        ----
+                                                                        <code>
+                                                                        return abci.ResponseBeginBlock{
+                                                                            Events: ctx.EventManager().ABCIEvents(),
+                                                                        }
+                                                                        </code>
+                                                                    end note 
+                                                                return
+                                                                note over baseapp
+                                                                    如果注册了 ABCIListener, 
+                                                                    则调用 ABCIListener.ListenBeginBlock(...), 对其发出通知
+                                                                    ----
+                                                                    Ethermint实现中，没有注册 ABCIListener
+                                                                end note
+                                                            return
+                                                        return abciResponses.BeginBlock
+                                                    return : abciResponses.BeginBlock
+                                                return : abciResponses.BeginBlock
+
+                                                loop "针对区块中的每个Tx"
+                                                    state -> appConnConsensus :proxyAppConn.DeliverTxAsync(abci.RequestDeliverTx{Tx: tx})
+                                                        appConnConsensus -> localClient : app.appConn.DeliverTxAsync(req)
+                                                            localClient -> baseapp : app.Application.DeliverTx(params)
+                                                                baseapp -> baseapp : app.runTx(runTxModeDeliver, req.Tx)
+                                                                    note over baseapp 
+                                                                        runTx的详细流程，参看 CheckTx 阶段的流程
+                                                                    end note 
+                                                                return
+                                                            return : ResponseDeliverTx
+
+                                                            note over localClient
+                                                                使用回调函数
+                                                            end note 
+                                                        return
+                                                    return ://在 proxyCb 中收集了每个事务的执行结果
+                                                end loop
+
+                                                state -> appConnConsensus : proxyAppConn.EndBlockSync(...)
+                                                    appConnConsensus -> localClient : app.appConn.EndBlockSync(req)
+                                                        localClient -> baseapp : app.Application.EndBlock(req)
+                                                            baseapp -> EthermintApp : app.endBlocker(app.deliverState.ctx, req)
+                                                                note over baseapp, EthermintApp
+                                                                    初始化方式和 BeginBlocker 一样
+                                                                end note
+                                                                note over EthermintApp
+                                                                    执行上下文在 EthermintApp.EndBlocker 函数中
+                                                                end note 
+
+                                                                EthermintApp -> ModuleManager : app.mm.EndBlock(ctx, req)
+                                                                    note over ModuleManager
+                                                                        和 BeginBlock 类似，
+                                                                        按 OrderEndBlockers 定义的顺序，依次调用每个模块的 EndBlock 函数
+                                                                        模块EndBlock的返回值类型是：[]abci.ValidatorUpdate
+                                                                    end note 
+                                                                    note over ModuleManager #FB8180
+                                                                        EndBlock的返回值，包含了Validator的更新信息
+                                                                        ----
+                                                                        <code>
+                                                                        return abci.ResponseEndBlock{
+                                                                            ValidatorUpdates: validatorUpdates,
+                                                                            Events: ctx.EventManager().ABCIEvents(),
+                                                                        }
+                                                                        </code>
+                                                                    end note
+                                                                return
+                                                            return
+                                                        return abciResponses.EndBlock
+                                                    return : abciResponses.EndBlock
+                                                return : abciResponses.EndBlock
+                                            return : abciResponses
+
+                                            BlockExecutor -> dbStore : blockExec.store.SaveABCIResponses(block.Height, abciResponses)
+                                                note over dbStore
+                                                    存储 ABCI 接口的返回结果
+                                                end note 
+                                            return
+
+                                            group #SkyBlue "更新 validator" 
+                                                note over BlockExecutor
+                                                    // 取出EndBlock的返回值中的Validator更新信息
+                                                    abciValUpdates := abciResponses.EndBlock.ValidatorUpdates
+                                                end note 
+                                                BlockExecutor -> state : validateValidatorUpdates(abciValUpdates, state.ConsensusParams.Validator)
+                                                return
+                                                note over BlockExecutor
+                                                    // 格式转换
+                                                    validatorUpdates = types.PB2TM.ValidatorUpdates(abciValUpdates)
+                                                end note 
+                                                BlockExecutor -> state : updateState(state, blockID, &block.Header, abciResponses, validatorUpdates)
+                                                return
+                                            end group
+
+                                            BlockExecutor -> BlockExecutor #Pink : blockExec.Commit(state, block, abciResponses.DeliverTxs)
+                                                BlockExecutor -> CListMempool : blockExec.mempool.FlushAppConn()
+                                                    note over CListMempool
+
+                                                    end note
+                                                return
+
+                                                BlockExecutor -> appConnConsensus : blockExec.proxyApp.CommitSync()
+                                                    appConnConsensus -> localClient : app.appConn.CommitSync()
+                                                        localClient -> baseapp : app.Application.Commit()
+                                                            baseapp -> CacheMultiStore : app.deliverState.ms.Write()
+                                                            return
+
+                                                            baseapp -> RootMultiStore : app.cms.Commit()
+                                                            return
+                                                        return
+                                                    return
+                                                return
+                                            return
+                                        return
+                                    return
+                                return
+                            return
+                        end alt 
+                    end alt
+                return
+                note over ConsensusState
+                    如果出现错误，进行处理
+                end note 
+            return
+        end alt 
+
+
+    return
+
+
+@enduml
+
+@startuml 3.tx的处理流程-泳道图
+    title 
+        tx的处理流程-泳道图
+    end title
+
+
+    |#AE71F5|eRPC|Ethermint.EthRpcServer
+
+    |#9BE3E4|baseapp|CosmosSDK.BaseApp
+
+    |#748AF9|mempool|Tendermint.Mempool
+    |#3450DE|consensus|<color:White>Tendermint.Consensus
+    |#0C2FE5|bcStore|<color:White>Tendermint.BlockChainStore
+
+
+    |eRPC|
+        start
+
+        :接收满足以太坊RPC接口标准的请求;
+
+        :封装成cosmos格式的tx
+        （作为tx中的一个message）;
+
+    |mempool|
+        :tx-hash被加入本地mempool-cache中;
+
+        #LimeGreen:通过 ABCI 接口的 CheckTx 函数，
+        将tx传递给 CosmosSDK 处理<
+
+    |baseapp|
+        package "以 mode=runTxModeCheck 调用runTx函数" {
+            :对tx进行解码;
+            note right
+                采用 TypeURL+反射 的方式，
+            end note 
+
+            :调用EthermintApp注册的anteHandler对tx进行校验;
+        }
+
+    |mempool|
+        :CheckTx 检查消息通过，
+        将tx加入本地mempool中;
+
+        :进入tx的广播和共识流程|
+
+    |consensus|
+        :共识流程的消息通信完成
+        (收到2/3+节点的Precommit消息)/
+
+    |bcStore|
+        :存储区块;
+
+    |consensus|
+        #LimeGreen:通过 ABCI 接口的 BeginBlock 函数，
+        通知 CosmosSDK 新的区块已经生成<
+
+    |baseapp|
+        :根据 ModuleManager 中设定的模块调用顺序，
+        依次调用每个模块的 BeginBlock 函数;
+    
+    |consensus|
+        #LimeGreen:通过 ABCI 接口的 DeliverTx 函数，
+        将 tx 传递给 CosmosSDK 处理<
+
+    |baseapp|
+        package "以 mode=runTxModeDeliver 调用runTx函数" {
+            :对tx进行解码;
+
+            :调用EthermintApp注册的anteHandler对tx进行校验;
+
+            :从Tx中逐个取出message, 调用模块注册的处理函数进行处理;
+        }
+
+    |consensus|
+        #LimeGreen:通过 ABCI 接口的 EndBlock 函数，
+        通知 CosmosSDK 本区块的处理已经完成<
+
+    |baseapp|
+        :根据 ModuleManager 中设定的模块调用顺序，
+        依次调用每个模块的 EndBlock 函数;
+
+    |consensus|
+        :存储 ABCI 执行结果，
+        根据EndBlock的返回值更新validator信息;
+
+        #LimeGreen:通过 ABCI 接口的 Commit 函数，
+        通知 CosmosSDK 本区块的处理已经完成<
+
+    |baseapp|
+        :将本区块的状态存储到数据库中;
+
+        stop 
+
+@enduml
+
+@startuml 4.查询流程序列图
+    title 
+        查询流程序列图
+        以 eth_call 为例
+    end title
+
+    actor cli
+
+    box ethermint
+        participant PublicAPI as "🚧<<struct>> \n rpc.namespaces.ethereum.eth.PublicAPI"
+        participant rpcBackend as "🚧<<struct>> \n rpc.backend.Backend"
+
+        participant evmQueryClient as "🚧<<struct>> \n x.evm.types.queryClient"
+        participant evmKeeper as "🚧<<struct>> \n x.evm.keeper.Keeper"
+
+        participant EthCallHandler as "🌀<<func>> \n x.evm.types._Query_EthCall_Handler"
+    end box
+
+    box CosmosSDK
+        participant clientContext as "📦️<<package>> \n client.Context"
+        participant baseapp as "🚧<<struct>> \n baseapp.BaseApp"
+
+        participant lambda_1 as "🌀<<func>> \n baseapp.MsgServiceRouter.RegisterService \n 返回的闭包函数\n 闭包函数1"
+    end box
+
+    box Tendermint
+        participant rpcClientLocal as "🚧<<struct>> \n rpc.client.local.Local"
+        participant rpcCore as "📦️<<package>> \n rpc.core"
+
+        participant BlockStore as "🚧<<struct>> \n store.BlockStore"
+
+        participant appConnQuery as "🚧<<struct>> \n proxy.appConnQuery"
+        participant localClient as "🚧<<struct>> \n abci.abcicli.localClient"
+    end box
+
+    autonumber
+    autoactivate on
+
+    cli -> PublicAPI : Call(...)
+        PublicAPI -> rpcBackend : e.backend.DoCall(args, blockNum)
+            rpcBackend -> rpcBackend #MediumSeaGreen: b.TendermintBlockByNumber(blockNr) \n//blockNr 就是 block-number
+                note over rpcBackend
+                    // 如果没有传递 blockNumber，则从应用状态获取这个值
+                    n, err := b.BlockNumber()
+                end note 
+
+                rpcBackend -> rpcClientLocal : b.clientCtx.Client.Block(b.ctx, &height)
+                    rpcClientLocal -> rpcCore : core.Block(c.ctx, height)
+                        rpcCore -> BlockStore: env.BlockStore.LoadBlock(height)
+                        return
+                        rpcCore -> BlockStore: env.BlockStore.LoadBlockMeta(height)
+                        return: types.BlockMeta blockMeta
+                    return 
+                return :ctypes.ResultBlock
+            return
+
+            note over rpcBackend
+                // 构造请求
+                <code>
+                req := evmtypes.EthCallRequest{
+                    Args:            bz,
+                    GasCap:          b.RPCGasCap(),
+                    ProposerAddress: sdk.ConsAddress(header.Block.ProposerAddress),
+                    ChainId:         b.chainID.Int64(),
+                }
+                </code>
+                ----
+                //准备context
+                <code>
+                ctx := rpctypes.ContextWithHeight(blockNr.Int64())
+                ctx, cancel = context.WithTimeout(ctx, timeout)
+                </code>
+            end note 
+            rpcBackend -> evmQueryClient : b.queryClient.EthCall(ctx, &req)
+                evmQueryClient -> clientContext : c.cc.Invoke(ctx, "/ethermint.evm.v1.Query/EthCall", in, out, opts...)
+                alt "ctx.GRPCClient != nil  //Case 2-1. Invoke grpc."
+                    note over clientContext #Tomato
+                        在 app.toml 的 grpc 被开启时，会进入这个分支
+                        最好将其关闭
+                        <code>
+                        [grpc]
+                        # Enable defines if the gRPC server should be enabled.
+                        enable = false
+                        # Address defines the gRPC server address to bind to.
+                        address = "0.0.0.0:9090"
+                        </code>
+                    end note 
+                    note over clientContext
+                        ctx.GRPCClient.Invoke(grpcCtx, method, req, reply, opts...)
+                        进入这个处理分支，会使用rpc接口向 BaseApp 启动的一个 RPC 服务发送请求
+                        最终会调用 BaseAPP.RegisterGRPCServer 注册的处理函数中进行处理。
+                        ====
+                        这是个低效方式。
+                    end note 
+                else "Case 2-2. Querying state via abci query"
+                    note over clientContext
+                        // 对请求进行编码
+                        <code>
+                        reqBz, err := ctx.gRPCCodec().Marshal(req)
+
+                        abciReq := abci.RequestQuery{
+                        Path:   method,
+                        Data:   reqBz,
+                        Height: ctx.Height,
+                        }
+                        </code>
+                    end note 
+                    clientContext -> clientContext #DodgerBlue: ctx.QueryABCI(abciReq)
+                        clientContext -> clientContext #MediumOrchid: ctx.queryABCI(req)
+                            note over clientContext
+                                <code>
+                                opts := rpcclient.ABCIQueryOptions{
+                                    Height: queryHeight,
+                                    Prove:  req.Prove,
+                                }
+                                </code>
+                            end note 
+                            clientContext -> rpcClientLocal: node.ABCIQueryWithOptions(context.Background(),req.Path,req.Data,opts)
+                                rpcClientLocal -> rpcCore : core.ABCIQuery(c.ctx,path,data,opts.Height,opts.Prove)
+                                    rpcCore -> appConnQuery: env.ProxyAppQuery.QuerySync(...)
+                                        appConnQuery -> localClient: app.appConn.QuerySync(reqQuery)
+                                            localClient -> baseapp: app.Application.Query(req)
+                                                note over baseapp
+                                                    //使用了 gRPC server 的路由表
+                                                    grpcHandler := app.grpcQueryRouter.Route(req.Path)
+                                                end note
+                                                baseapp -> baseapp #Magenta:app.handleQueryGRPC(grpcHandler, req)
+                                                    note over baseapp
+                                                        handler 就是实参 grpcHandler
+                                                    end note 
+                                                    baseapp -> lambda_1 : handler(ctx, req) 
+                                                        note over lambda_1
+                                                            // methodHandler 和 handler 的来源：
+                                                            <code>
+                                                            RegisterService(sd, handler) {
+                                                                for _, method := range sd.Methods{
+                                                                    ...
+                                                                    ethodHandler := method.Handler
+                                                                }
+                                                            }
+                                                            </code>
+                                                        end note 
+                                                        lambda_1 -> EthCallHandler : methodHandler(handler, sdk.WrapSDKContext(ctx),...)
+                                                            note over EthCallHandler
+                                                                将实参 handler 强制转换为 QueryServer
+                                                            end note 
+                                                            EthCallHandler -> evmKeeper : srv.(QueryServer).EthCall(ctx, in)
+                                                                note over evmKeeper
+                                                                    // 传递的contex中，为call调用准备好了相应的环境
+                                                                    ctx := sdk.UnwrapSDKContext(c)
+                                                                end note
+                                                                evmKeeper -> evmKeeper #Fuchsia : k.ApplyMessageWithConfig(ctx, msg, nil, false, cfg, txConfig)
+                                                                    note over evmKeeper
+                                                                        创建evm实例，执行调用
+                                                                        形参 commit = false
+                                                                    end note
+                                                                return : MsgEthereumTxResponse
+                                                        return
+                                                    return
+                                                return
+                                            return
+                                        return
+                                    return : resQuery
+                                return
+                            return
+                        return
+                    return : reqBz
+                end alt 
+                return
+            return
+        return
+    return
+
+
+@enduml
+
+@startuml 5.查询流程-泳道图
+    title 
+        查询流程-泳道图
+        以 eth_call 为例
+    end title
+
+    |#AE71F5|eRPC|Ethermint.EthRpcServer
+
+    |#9BE3E4|baseapp|CosmosSDK.BaseApp
+
+    |#748AF9|query|Tendermint.Query
+    |#0C2FE5|bcStore|<color:White>Tendermint.BlockChainStore
+
+    |eRPC|
+        start
+
+        :接收满足以太坊RPC接口标准的请求;
+
+        :如果没有指定高度，使用最新高度;
+    
+    |bcStore|
+        :取出指定高度的区块;
+        note right
+            实际只使用区块中的
+            ProposerAddress 信息
+        end note
+
+    |eRPC|
+        :对请求信息进行编码;
+
+    |query|
+        #LimeGreen:通过 ABCI 接口的 Query 函数，
+        将请求传递给 CosmosSDK 处理<
+
+    |baseapp|
+        :根据启动时注册的路由信息，
+        调用对应的注册函数进行处理
+        ----
+        各个模块对应的处理函数被调用;
+    
+    stop
+
+@enduml
+
+
+@startuml 8.txDecoder的详细流程
     title
         txDecoder的详细流程
     end title
@@ -287,7 +908,7 @@
     end note
 @enduml
 
-@startuml 3.BaseApp.runMsg的详细流程
+@startuml 9.BaseApp.runMsg的详细流程
     title 
         BaseApp.runMsg的详细流程
     end title

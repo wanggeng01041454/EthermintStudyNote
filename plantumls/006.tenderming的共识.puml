@@ -1,29 +1,547 @@
 @startuml 1.共识数据结构
 
-namespace Tendermint {
+    namespace Tendermint {
 
-    namespace libs.service {
-        interface Service {
-            +start()
-            +stop()
+        namespace libs {
+            namespace service {
+                interface Service {
+                    +start()
+                    +stop()
+                }
+
+                struct BaseService {
+                    Service impl;
+                }
+                BaseService::impl o-> Service
+            }
+
+            namespace events {
+                interface Fireable {
+                    FireEvent(event string, data EventData)
+                }
+                interface EventSwitch {
+                    ....
+                    AddListenerForEvent(listenerID, event string, cb EventCallback)
+                    ....
+                    RemoveListenerForEvent(event string, listenerID string)
+                    ....
+                }
+                Fireable <|-- EventSwitch
+
+                struct eventSwitch {
+
+                }
+                EventSwitch <|-- eventSwitch : 实现接口
+            }
+
+
+
         }
 
-        struct BaseService {
-            Service impl;
+        namespace state {
+            interface BlockStore {
+
+            }
+
+            struct BlockExecutor {
+
+            }
         }
-        BaseService::impl o--> Service
+        namespace store {
+            struct BlockStore {
+                dbm.DB db;
+                ....
+                int64 base;
+                ....
+                int64 height;
+            }
+        }
+        state.BlockStore <|-- store.BlockStore : 实现接口
+
+
+
+        namespace consensus {
+            namespace types {
+                struct RoundState {
+                    ....
+                    RoundStepType Step; //⭐当前轮次的状态️
+                    ....
+                    types.ValidatorSet* Validators;
+                    ....
+                    HeightVoteSet* Votes;
+                    ....
+                }
+            }
+
+            interface WAL {
+
+            }
+            struct BaseWAL {
+
+            }
+            WAL <|-- BaseWAL : 实现接口
+
+            struct State {
+                ....
+                types.EventBus* eventBus
+                ....
+                //cmtevents="tendermint/libs/events"
+                cmtevents.EventSwitch evsw;
+                ....
+                //sm = "tendermint/state"
+                sm.BlockStore blockStore
+                sm.BlockExecutor* blockExec
+                ....
+                WAL wal; //write-ahead-log
+            }
+            types.RoundState <|-- State : 通过嵌入实现继承
+            State o--> WAL
+        }
+        libs.service.BaseService <|-- consensus.State : 通过嵌入实现继承
+
+        consensus.State o--> libs.events.eventSwitch
+        consensus.State o--> state.BlockStore
+        consensus.State o--> state.BlockExecutor
     }
 
-    namespace consensus {
+@enduml
 
-        struct State {
+@startuml 2.p2p层到共识层的消息
+    title p2p层到共识层的消息
 
+    namespace Tendermint {
+        namespace consensus {
+            struct msgInfo {
+                Message Msg;
+                ....
+                p2p.ID PeerID;
+            }
+
+            interface Message
+            msgInfo::Msg o-> Message
+
+            package "consensus State的handleMsg函数仅处理这三种消息" #SkyBlue {
+                struct ProposalMessage {
+                    types.Proposal* Proposal;
+                }
+                Message <|-- ProposalMessage
+
+                struct BlockPartMessage {
+                    int64 Height;
+                    ....
+                    int32 Round;
+                    ....
+                    types.Part* Part;
+                }
+                Message <|-- BlockPartMessage
+
+                struct VoteMessage {
+                    types.Vote* Vote;
+                }
+                Message <|-- VoteMessage
+            }
+
+            struct HasVoteMessage {
+                int64 Height;
+                ....
+                int32 Round;
+                ....
+                //cmtproto = "proto/tendermint/types"
+                cmtproto.SignedMsgType Type;
+                ....
+                int32 Index;
+            }
+            Message <|-- HasVoteMessage
+
+
+            struct VoteSetMaj23Message {
+                int64 Height;
+                ....
+                int32 Round;
+                ....
+                //cmtproto = "proto/tendermint/types"
+                cmtproto.SignedMsgType Type;
+                ....
+                types.BlockID BlockID;
+            }
+            Message <|-- VoteSetMaj23Message
+
+            struct VoteSetBitsMessage {
+
+            }
+            Message <|-- VoteSetBitsMessage
         }
 
+        namespace types {
 
+        }
     }
-    libs.service.BaseService <|-- consensus.State
-}
+@enduml
+
+@startuml 3.共识状态机的状态迁移图
+
+    title 
+        详细的共识状态机迁移图
+        RoundState  即每个 Round 都有一个 State
+    end title
+
+    note as readme 
+        经过 2/3+ Prevote 投票的 Block, 是 ValidBlock;
+        ....
+        经过 2/3+ Prevote 投票 并且 投了 Precommit 后，是 LockedBlock;
+    end note 
+
+    state RoundStepNewHeight 
+        RoundStepNewHeight : = 1
+        RoundStepNewHeight : Wait til CommitTime + timeoutCommit
+
+    state RoundStepNewRound
+        RoundStepNewRound : = 2
+        RoundStepNewRound : Setup new round and go to RoundStepPropose
+
+    state RoundStepPropose
+        RoundStepPropose : = 3
+        RoundStepPropose : Did propose, gossip proposal
+
+    state RoundStepPrevote
+        RoundStepPrevote : = 4
+        RoundStepPrevote : Did prevote, gossip prevotes
+
+
+    state RoundStepPrevoteWait
+        RoundStepPrevoteWait : = 5
+        RoundStepPrevoteWait : Did receive any +2/3 prevotes, start timeout
+
+    state RoundStepPrecommit 
+        RoundStepPrecommit : = 6
+        RoundStepPrecommit : Did precommit, gossip precommits
+
+    state RoundStepPrecommitWait #LightSteelBlue
+        RoundStepPrecommitWait : = 7
+        RoundStepPrecommitWait : Did receive any +2/3 precommits, start timeout
+
+    note left of RoundStepPrecommitWait
+        实际代码中未使用这个状态值，
+        而是使用了一个独立的变量 
+        bool TriggeredTimeoutPrecommit
+        代替了它。
+    end note 
+
+
+    state RoundStepCommit
+        RoundStepCommit : = 8
+        RoundStepCommit : Entered commit state machine
+    
+
+
+    [*] --> RoundStepNewRound : 系统启动时，进入新的轮次
+    
+
+    note as RoundStepNewRound_2_RoundStepPropose
+        迁移条件：
+        无条件迁移
+        ====
+        迁移时的Actions: enterPropose 函数
+        1. <color:red>设置一个定时器， 但超时的出发状态为 enterPrevote 
+        ....
+        2. 如果是 Proposer，生成 Proposal 并广播
+    end note 
+    RoundStepNewRound --> RoundStepNewRound_2_RoundStepPropose
+    RoundStepNewRound_2_RoundStepPropose --> RoundStepPropose
+
+
+    note as RoundStepPropose_2_RoundStepPrevote
+        迁移条件：
+        ....
+        1. 收全了 BlockPart， 并且 收到 Proposal
+        ....
+        2. <color:red>超时， 超时条件在 RoundStepNewRound时设置
+        ====
+        迁移时的Action:(enterPrevote 函数)
+        <color:blue>以下3个只有1个会执行
+        ....
+        1. cs.LockedBlock != nil, 对 LockedBlock 进行Prevote投票
+        ....
+        2. 如果 ProposalBlock == nil 或者 ProposalBlock is invalid，
+            则 Prevote Nil
+            <color:red>超时，且未收到 Proposal 时，则会走到这个分支
+        ....
+        3. Prevote ProposalBlock
+    end note 
+    RoundStepPropose --> RoundStepPropose_2_RoundStepPrevote 
+    RoundStepPropose_2_RoundStepPrevote --> RoundStepPrevote 
+
+    RoundStepPropose ---> RoundStepPropose : 未收到 Proposal \n 或者未收全所有的 BlockPart \n 自循环
+
+    note as RoundStepPrevote_2_RoundStepPrevoteWait
+        迁移条件：
+        ....
+        1. 收到了 +2/3 的 Prevote, 但是没有针对
+            同一个 Block 达成共识
+        ====
+        迁移时的Action:(enterPrevoteWait 函数)
+        ....
+        1. 设置了一个定时器
+    end note 
+    RoundStepPrevote --> RoundStepPrevote_2_RoundStepPrevoteWait
+    RoundStepPrevote_2_RoundStepPrevoteWait --> RoundStepPrevoteWait
+
+
+
+    note as RoundStepPrevote_2_RoundStepPrecommit
+        迁移条件：
+        ....
+        1. 收到了 +2/3 的 Prevote，且达成了共识
+        ====
+        迁移时的Action:(enterPrecommit 函数)
+        <color:red>以下5个只有1个会执行
+        ....
+        1. 如果并没有收到+2/3 的 Prevote， 则 Precommit Nil
+            <color:blue>在这个迁移条件里，这个事件肯定不会发生
+        ....
+        2. if len(blockID.Hash) == 0
+            则 Precommit Nil, 同时令 LockedBlock = nil
+            <color:blue>这个是可能发生的，大家都 Prevote Nil 的情况
+        ....
+        3. 有 LockedBlock, 且和 Prevote 的Block一致
+            则 Precommit LockedBlock
+        ....
+        4. ProposalBlock 和 Prevote 的Block一致
+            则 Precommit ProposalBlock，
+            同时令 LockedBlock = ProposalBlock
+        ....
+        5. ProposalBlock 和 Prevote 的Block不一致
+            则 Precommit Nil
+            同时令 
+            LockedBlock = nil， 
+            ProposalBlock = nil
+    end note
+    RoundStepPrevote --> RoundStepPrevote_2_RoundStepPrecommit
+    RoundStepPrevote_2_RoundStepPrecommit --> RoundStepPrecommit
+
+    RoundStepPrevote ---> RoundStepPrevote : 收到的Prevote不足以改变状态；\n自循环
+
+    note as RoundStepPrevote_2_RoundStepNewRound
+        迁移条件：
+        ....
+        投票针对的 Round 值大于当前节点的 Round值，
+        且 vote 代表的投票量已经达到了 2/3+，
+        则说明整个区块链系统的共识已进入到了新的 Round，
+        本节点还没有跟上
+        ====
+        迁移动作：（enterNewRound 函数）
+    end note 
+
+    RoundStepPrevote --[#red]-> RoundStepPrevote_2_RoundStepNewRound
+    RoundStepPrevote_2_RoundStepNewRound -[#red]> RoundStepNewRound
+
+    note as RoundStepPrevoteWait_2_RoundStepPrecommit
+        迁移条件：
+        ....
+        1. <color:red>定时器超时超时
+        ====
+        迁移时的Action:(enterPrecommit 函数)
+        参看另外的 enterPrecommit 函数细节
+        ....
+        1. 如果再接收一些Prevote仍旧无法达成共识，
+            <color:red>则会 Precommit Nil
+    end note 
+    
+    RoundStepPrevoteWait -> RoundStepPrevoteWait_2_RoundStepPrecommit
+    RoundStepPrevoteWait_2_RoundStepPrecommit -> RoundStepPrecommit
+
+    note as RoundStepPrecommit_2_RoundStepPrecommitWait
+        迁移条件：
+        ....
+        1. Precommit 达成的共识结果是 Nil
+        ....
+        2. 收到的 Precommit 已经达到 2/3+，但是没有达成共识
+        ====
+        迁移时的Action:(enterPrecommitWait 函数)
+        ....
+        1. 设置了一个定时器
+    end note 
+    RoundStepPrecommit -[#red]-> RoundStepPrecommit_2_RoundStepPrecommitWait
+    RoundStepPrecommit_2_RoundStepPrecommitWait -[#red]-> RoundStepPrecommitWait
+
+    RoundStepPrecommit ---> RoundStepPrecommit : 收到的Precommit不足以改变状态；\n自循环
+
+    RoundStepPrecommitWait -[#red]-> RoundStepNewRound : round++ \n 重新开始新的轮次
+
+
+    note as RoundStepPrecommit_2_RoundStepCommit
+        迁移条件：
+        ....
+        1. Precommit 达成了共识，且共识结果是一个 Block
+        ====
+        迁移时的Action:(enterCommit 函数)
+        ....
+        1. 存储区块
+        2. 调用 ABCI 接口处理区块中的事务
+
+    end note 
+    RoundStepPrecommit --> RoundStepPrecommit_2_RoundStepCommit
+    RoundStepPrecommit_2_RoundStepCommit --> RoundStepCommit
+
+
+    note as RoundStepCommit_2_RoundStepNewHeight
+        迁移条件：
+        ....
+        无条件迁移
+        ====
+        迁移时的Action: updateToState 函数 
+        和 scheduleRound0 函数
+        ....
+        1. 设置了 StartTime； 区块高度+1
+        2. 设置了 validators, 包含新的 proposer
+        3. <color:red>设置了一个定时器， 超时出发状态为 RoundStepNewRound
+    end note 
+    RoundStepCommit -> RoundStepCommit_2_RoundStepNewHeight
+    RoundStepCommit_2_RoundStepNewHeight -> RoundStepNewHeight
+
+    RoundStepNewHeight -[#Blue]--> RoundStepNewRound : 定时器超时 \n 进入新的轮次
+
+@enduml
+
+
+@startuml 4.创建提案的细节流程
+    title 创建提案的细节流程
+
+    start 
+
+    package "创建 ProposalBlock" {
+        :从 evidencePool 中获取 evidence;
+
+        :从 mempool 中获取 txs;
+        note left
+            取 txs 时，要遵循区块的
+            maxBytes 限定 和
+            maxGas 限定
+        end note 
+
+        :组装区块，并将区块编码后
+        拆分成多个 Part
+        ----
+        以便于生成 BlockID;
+        note left
+            关于Block的Part：
+            就是将 Block 编码成字节数组后，
+            再将该字节数组拆分成多个数据块，
+            每个数据块称为1个 Part，
+            每个Part最大为 65536 字节，
+            ----
+            为了进行校验，用Part做叶子节点，
+            计算出 MerkelRoot，
+        end note 
+    }
+
+    :生成 Proposal,
+    不包含签名字段;
+
+    :对 Proposal 进行签名,
+    并填充到签名字段;
+
+    :将 Proposal 写入 internalMsgQueue，
+    进入本节点收到 Proposal 的处理流程;
+
+    :将 Block的 Part 写入 internalMsgQueue，
+    进入本节点收到 BlockPart 的处理流程;
+
+    stop
 
 
 @enduml
+
+
+@startuml 5.共识相关数据
+    title
+        共识相关数据
+    end title
+
+    namespace Tendermint {
+        namespace types {
+
+            struct PartSetHeader {
+                uint32 Total;
+                ....
+                cmtbytes.HexBytes Hash;
+            }
+            struct BlockID {
+                cmtbytes.HexBytes Hash;
+                ....
+                PartSetHeader PartSetHeader;
+            }
+            BlockID o-> PartSetHeader
+
+            struct Header {
+                ....
+                int64 Height
+                ....
+                BlockID LastBlockID
+                ....
+                cmtbytes.HexBytes LastCommitHash
+                ....
+                // 当前区块的 validator
+                cmtbytes.HexBytes ValidatorsHash
+                ....
+                // 下一个区块的 validator
+                cmtbytes.HexBytes NextValidatorsHash
+            }
+
+            struct Data {
+                Txs Txs;
+            }
+
+            struct EvidenceData {
+                EvidenceList Evidence;
+            }
+
+            struct Commit {
+                int64 Height;
+                ....
+                int32 Round;
+                ....
+                BlockID BlockID;
+                ....
+                CommitSig[] Signatures;
+            }
+
+            struct Block #SkyBlue {
+                Header Header;
+                ....
+                Data Data;
+                ....
+                EvidenceData Evidence
+                ....
+                Commit LastCommit
+            }
+            Block o--> Header
+            Block o--> Data
+            Block o--> EvidenceData
+            Block o--> Commit
+
+            Header --> BlockID
+            Commit ---> BlockID
+
+            struct Proposal #Wheat {
+                int64 Height;
+                ....
+                int32 Round;
+                ....
+                int32 PolRound;
+                ....
+                BlockID BlockID;
+                ....
+                time.Time Timestamp;
+                ....
+                []byte Signature;
+            }
+            Proposal -up-> BlockID
+        }
+    }
+
+@enduml
+
+
+
+
