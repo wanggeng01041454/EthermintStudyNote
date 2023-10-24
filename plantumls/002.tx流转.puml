@@ -54,7 +54,7 @@
                 构造 cosmos 的 evm 模块 message
             end note 
             note over rpcBackend #SkyBlue
-                // 从 evm 格式的事务中计算出 txHash
+                // 从 evm 格式的交易中计算出 txHash
                 txHash := ethereumTx.AsTransaction().Hash()
             end note
 
@@ -287,8 +287,8 @@
                                                 note over state
                                                     在 execBlockOnProxyApp 函数中
                                                     ====
-                                                    定义闭包回调函数 proxyCb, 用于处理每个事务的执行结果
-                                                    在 proxyCb 中收集了每个事务的执行结果
+                                                    定义闭包回调函数 proxyCb, 用于处理每个交易的执行结果
+                                                    在 proxyCb 中收集了每个交易的执行结果
                                                 end note 
                                                 
                                                 state -> appConnConsensus : proxyAppConn.SetResponseCallback(proxyCb)
@@ -363,7 +363,7 @@
                                                                 使用回调函数
                                                             end note 
                                                         return
-                                                    return ://在 proxyCb 中收集了每个事务的执行结果
+                                                    return ://在 proxyCb 中收集了每个交易的执行结果
                                                 end loop
 
                                                 state -> appConnConsensus : proxyAppConn.EndBlockSync(...)
@@ -553,6 +553,118 @@
         stop 
 
 @enduml
+
+@startuml 3.1-tx的处理流程-拆分-Submit阶段
+    title 
+        Submit阶段 tx的处理流程 - 泳道图
+    end title
+
+
+    |#AE71F5|eRPC|Ethermint.EthRpcServer
+
+    |#9BE3E4|baseapp|CosmosSDK.BaseApp
+
+    |#748AF9|mempool|Tendermint.Mempool
+
+
+
+    |eRPC|
+        start
+
+        :接收满足以太坊RPC接口标准的请求;
+
+        :封装成cosmos格式的tx
+        （作为tx中的一个message）;
+
+    |mempool|
+        :tx-hash被加入本地mempool-cache中;
+
+        #LimeGreen:通过 ABCI 接口的 CheckTx 函数，
+        将tx传递给 CosmosSDK 处理<
+
+    |baseapp|
+        package "以 mode=runTxModeCheck 调用runTx函数" {
+            :对tx进行解码;
+            note right
+                采用 TypeURL+反射 的方式，
+            end note 
+
+            :调用EthermintApp注册的anteHandler对tx进行校验;
+        }
+
+    |mempool|
+        :CheckTx 检查消息通过，
+        将tx加入本地mempool中;
+
+        stop 
+
+@enduml
+
+@startuml 3.2-tx的处理流程-拆分-Commit阶段
+    title 
+        Commit阶段 tx的处理流程 - 泳道图
+    end title
+
+
+    |#9BE3E4|baseapp|CosmosSDK.BaseApp
+
+    |#3450DE|consensus|<color:White>Tendermint.Consensus
+    |#0C2FE5|bcStore|<color:White>Tendermint.BlockChainStore
+
+
+    |consensus|
+        start
+        note left
+            共识流程的消息通信完成
+            (收到2/3+节点的Precommit消息)
+        end note 
+
+    |bcStore|
+        :存储区块|
+
+    |consensus|
+        #LimeGreen:通过 ABCI 接口的 BeginBlock 函数，
+        通知 CosmosSDK 新的区块已经生成<
+
+    |baseapp|
+        :根据 ModuleManager 中设定的模块调用顺序，
+        依次调用每个模块的 BeginBlock 函数;
+    
+    |consensus|
+        #LimeGreen:通过 ABCI 接口的 DeliverTx 函数，
+        将 tx 传递给 CosmosSDK 处理<
+
+    |baseapp|
+        package "以 mode=runTxModeDeliver 调用runTx函数" {
+            :对tx进行解码;
+
+            :调用EthermintApp注册的anteHandler对tx进行校验;
+
+            :从Tx中逐个取出message, 调用模块注册的处理函数进行处理;
+        }
+
+    |consensus|
+        #LimeGreen:通过 ABCI 接口的 EndBlock 函数，
+        通知 CosmosSDK 本区块的处理已经完成<
+
+    |baseapp|
+        :根据 ModuleManager 中设定的模块调用顺序，
+        依次调用每个模块的 EndBlock 函数;
+
+    |consensus|
+        :存储 ABCI 执行结果，
+        根据EndBlock的返回值更新validator信息;
+
+        #LimeGreen:通过 ABCI 接口的 Commit 函数，
+        通知 CosmosSDK 本区块的处理已经完成<
+
+    |baseapp|
+        :将本区块的状态存储到数据库中;
+
+        stop 
+
+@enduml
+
 
 @startuml 4.查询流程序列图
     title 
@@ -939,9 +1051,9 @@
             ----
             mode 是 runTxMode 类型的变量，表示执行模式，mode取值有：
             * runTxModeCheck // 校验
-            * runTxModeReCheck // 在commit后，对pending的事务再校验
+            * runTxModeReCheck // 在commit后，对pending的交易再校验
             * runTxModeSimulate // 模拟执行 <color:red>[系统未使用这种模式]</color>
-            * runTxModeDeliver // 落地存储并执行事务
+            * runTxModeDeliver // 落地存储并执行交易
         end note
 
         loop 对每个msg进行处理
@@ -994,8 +1106,8 @@
                                 return: MsgEthereumTxResponse response 
 
                                 note over evmkeeper
-                                    事务本身的信息(ehterumTxHash等)
-                                    事务执行后所得的Log(合约中抛出的event)
+                                    交易本身的信息(ehterumTxHash等)
+                                    交易执行后所得的Log(合约中抛出的event)
                                     一并被封装到一个 abci.Event 数组中。
                                 end note
 

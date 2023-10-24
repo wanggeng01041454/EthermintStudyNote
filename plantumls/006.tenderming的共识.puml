@@ -377,7 +377,7 @@
         迁移时的Action:(enterCommit 函数)
         ....
         1. 存储区块
-        2. 调用 ABCI 接口处理区块中的事务
+        2. 调用 ABCI 接口处理区块中的交易
 
     end note 
     RoundStepPrecommit --> RoundStepPrecommit_2_RoundStepCommit

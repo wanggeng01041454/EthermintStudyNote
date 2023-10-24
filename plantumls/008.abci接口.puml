@@ -19,7 +19,7 @@
             }
         }
 
-        namespace abci #SkyBlue {
+        namespace abci {
             namespace abcicli {
                 interface Client {
 
@@ -28,16 +28,25 @@
                     abci/client/client.go
                 end note 
 
-                struct localClient {
+                struct localClient #HotPink {
                     Application types.Application
                 }
-
                 Client <|-- localClient
+
+                struct grpcClient {
+
+                }
+                Client <|-- grpcClient
+
+                struct socketClient {
+
+                }
+                Client <|-- socketClient
                 
             }
 
             namespace types {
-                interface Application {
+                interface Application #HotPink {
 
                 }
                 note left
@@ -51,7 +60,17 @@
         namespace proxy {
             
             interface AppConnConsensus {
-
+                <color:DarkGreen>共识子接口
+                ====
+                InitChainSync
+                ----
+                BeginBlockSync
+                ....
+                DeliverTxAsync
+                ....
+                EndBlockSync
+                ....
+                CommitSync
             }
             struct appConnConsensus {
                 appConn abcicli.Client
@@ -60,7 +79,15 @@
 
 
             interface AppConnMempool {
-
+                <color:DarkGreen>内存池子接口
+                ====
+                CheckTxAsync
+                ....
+                CheckTxSync
+                ----
+                FlushAsync
+                ....
+                FlushSync
             }
             struct appConnMempool {
                 appConn abcicli.Client
@@ -68,7 +95,13 @@
             AppConnMempool <|-- appConnMempool
 
             interface AppConnQuery {
-
+                <color:DarkGreen>查询子接口
+                ====
+                QuerySync
+                ----
+                InfoSync
+                ----
+                EchoSync
             }
             struct appConnQuery {
                 appConn abcicli.Client
@@ -76,26 +109,42 @@
             AppConnQuery <|-- appConnQuery
 
             interface AppConnSnapshot {
-
+                <color:DarkGreen>快照子接口
+                ====
+                ListSnapshotsSync
+                ....
+                OfferSnapshotSync
+                ----
+                LoadSnapshotChunkSync
+                ....
+                ApplySnapshotChunkSync
             }
             struct appConnSnapshot {
                 appConn abcicli.Client
             }
             AppConnSnapshot <|-- appConnSnapshot
 
-            interface ClientCreator #LimeGreen {
-                NewABCIClient()
+            interface ClientCreator {
+                NewABCIClient() abcicli.Client
             }
-            note bottom
-                实际中使用的 ClientCreator 是 localClientCreator
-                它的 NewABCIClient() 函数返回的实现为：
-                ----
-                <code>
-                return abcicli.NewLocalClient(l.mtx, l.app), nil
-                </code>
-            end note 
+            struct localClientCreator {
+                //上层应用和Tendermint
+                //<color:Red>在同一个进程中
+                //使用该实现
+            }
+            struct remoteClientCreator {
+                //上层应用和Tendermint
+                //<color:Red>不在同一个进程中
+                //使用该实现
+            }
+            ClientCreator <|-- localClientCreator
+            ClientCreator <|-- remoteClientCreator
+
 
             interface AppConns {
+                <color:DarkGreen>通过调用接口函数
+                <color:DarkGreen>返回实现了 AppConnXXX 接口的对象
+                ====
                 Mempool() AppConnMempool
                 ....
                 Consensus() AppConnConsensus
@@ -104,17 +153,11 @@
                 ....
                 Snapshot() AppConnSnapshot	
             }
-            struct multiAppConn <<关键对象>> #HotPink {
-
+            struct multiAppConn <<通过该对象分发ABCI的子接口对象>> {
+                <color:DarkGreen>//在 node.NewNode 函数中被创建
+                ====
             }
-            note left of multiAppConn
-                在 node.NewNode 函数中被创建
-                <code>
-                proxyApp, err := createAndStartProxyAppConns(clientCreator, logger)
-                </code>
-                ----
-                之后，proxyApp 被存放在 node.Node 的 proxyApp 字段中
-            end note 
+
             AppConns <|-- multiAppConn
 
             multiAppConn o-- AppConnConsensus
@@ -125,10 +168,50 @@
             multiAppConn o-- ClientCreator : 用于创建 Client 对象
         }
 
-        'tendermint 内部
-        libs.service.Service <|--- abci.abcicli.Client
-        libs.service.BaseService <|--- abci.abcicli.localClient
+        namespace state {
+            struct BlockExecutor {
+                proxyApp proxy.AppConnConsensus
+            }
+        }
+        namespace consensus {
+            struct State #DeepSkyBlue {
+                共识引擎 数据结构
+                ====
+                blockExec *sm.BlockExecutor
+            }
+        }
+        consensus.State o-- state.BlockExecutor
 
+        namespace mempool.v0 {
+            struct CListMempool #DeepSkyBlue {
+                内存池 数据结构
+                ====
+                proxyAppConn proxy.AppConnMempool
+            }
+        }
+
+        namespace rpc.core {
+            struct Environment #SkyBlue {
+                rpc 环境的数据结构
+                它同时包含了 查询子接口 和 内存池子接口
+                ====
+                ProxyAppQuery   proxy.AppConnQuery
+                ....
+                ProxyAppMempool proxy.AppConnMempool               
+            }
+        }
+
+        namespace statesync {
+            struct Reactor #DeepSkyBlue {
+                状态同步引擎 数据结构
+                ====
+                conn proxy.AppConnSnapshot
+                ....
+                connQuery proxy.AppConnQuery
+            }
+        }
+
+        'tendermint 内部
         libs.service.Service <|--- proxy.AppConns
         libs.service.BaseService <|--- proxy.multiAppConn
 
@@ -136,6 +219,13 @@
         proxy.appConnMempool o---- abci.abcicli.Client
         proxy.appConnQuery o---- abci.abcicli.Client
         proxy.appConnSnapshot o---- abci.abcicli.Client
+
+        state.BlockExecutor o-[#LimeGreen]- proxy.AppConnConsensus
+        mempool.v0.CListMempool o--[#Blue]-- proxy.AppConnMempool
+        rpc.core.Environment o-[#Fuchsia]- proxy.AppConnQuery
+        rpc.core.Environment o-[#Blue]- proxy.AppConnMempool
+        statesync.Reactor o-[#Gold]- proxy.AppConnSnapshot
+        statesync.Reactor o-[#Fuchsia]- proxy.AppConnQuery
     }
 
 

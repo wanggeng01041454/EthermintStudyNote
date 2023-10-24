@@ -12,7 +12,7 @@
                 sdk.TxDecoder txDecoder
             }
             note left of BaseApp::txDecoder
-                事务解码函数指针，函数原型为：
+                交易解码函数指针，函数原型为：
                 type TxDecoder func(txBytes []byte) (Tx, error)
                 字段初始化：
                 txDecoder = encodingConfig.TxConfig.TxDecoder()
