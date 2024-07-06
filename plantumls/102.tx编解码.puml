@@ -139,12 +139,12 @@
             }
 
         }
-        simapp.params.EncodingConfig::InterfaceRegistry o-- codec.types.interfaceRegistry
-        simapp.params.EncodingConfig::TxConfig o-- x.auth.tx.config
-        simapp.params.EncodingConfig::Codec o--- codec.ProtoCodec 
-        simapp.params.EncodingConfig::Amino o-- codec.LegacyAmino
+        simapp.params.EncodingConfig::InterfaceRegistry o--> codec.types.interfaceRegistry
+        simapp.params.EncodingConfig::TxConfig o--> x.auth.tx.config
+        simapp.params.EncodingConfig::Codec o---> codec.ProtoCodec 
+        simapp.params.EncodingConfig::Amino o--> codec.LegacyAmino
 
-        codec.ProtoCodec::interfaceRegistry o- codec.types.interfaceRegistry
+        codec.ProtoCodec::interfaceRegistry o--> codec.types.interfaceRegistry
 
         baseapp.BaseApp::txDecoder .[#DarkGreen].> client.TxEncodingConfig::TxDecoder 
     
@@ -370,10 +370,55 @@
 @startuml 3.tx的结构
     title
         tx的结构
+        编码 和 解码 相关的数据结构
+        编码部分以 MsgEthereumTx 的编码为例
     end title
 
     namespace CosmosSDK {
+
+        namespace client {
+
+            struct Context {
+                TxConfig TxConfig
+            }
+
+            interface TxEncodingConfig {
+                TxEncoder() sdk.TxEncoder
+                ....
+                TxDecoder() sdk.TxDecoder
+                ....
+                TxJSONEncoder() sdk.TxEncoder
+                ....
+                TxJSONDecoder() sdk.TxDecoder
+            }
+
+            interface TxConfig {
+                NewTxBuilder() TxBuilder
+                ....
+                WrapTxBuilder(sdk.Tx) (TxBuilder, error)
+            }
+            TxEncodingConfig <|-- TxConfig
+            Context o--> TxConfig
+
+            interface TxBuilder {
+                GetTx() signing.Tx
+                ....
+                SetMsgs(msgs ...sdk.Msg) error
+            }
+            TxConfig --> TxBuilder : 引用
+
+        }
+
         namespace codec.types {
+            interface UnpackInterfacesMessage {
+                UnpackInterfaces(unpacker AnyUnpacker) error
+            }
+
+            interface AnyUnpacker {
+                UnpackAny(any *Any, iface interface{}) error
+            }
+            UnpackInterfacesMessage ..> AnyUnpacker
+
             struct Any #SpringGreen {
                 string TypeUrl; // 记录实际类型的URL;例如取值为 '/cosmos.bank.v1beta1.MsgSend'
                 ....
@@ -382,21 +427,34 @@
                 cachedValue interface{}; //存放解码后的实际类型
             }
 
-            interface UnpackInterfacesMessage {
-                UnpackInterfaces(unpacker AnyUnpacker)
-            }
-            interface AnyUnpacker {
-                UnpackAny(interface{}) error
-            }
-            UnpackInterfacesMessage::UnpackInterfaces .> AnyUnpacker
+            AnyUnpacker ..> Any
         }
 
         namespace types {
-            interface Msg {
+            interface Message <<定义在protobuf中>> {
+                Reset()
+                ....
+                String() string
+                ....
+                ProtoMessage()
             }
 
+            interface Msg {
+                ValidateBasic() error
+                ....
+                GetSigners() []AccAddress
+            }
+            Message <|-- Msg :嵌入接口
+
+            collections AllModuleMsgs [
+                =各个模块的消息
+            ]
+            Msg <|-[thickness=3]- AllModuleMsgs
+
             interface Tx #LimeGreen {
-                + []Msg GetMsgs()
+                GetMsgs() []Msg
+                ....
+                ValidateBasic() error
             }
             Tx -> Msg 
             interface FeeTx {
@@ -427,83 +485,268 @@
                     Tip Tip; // struct Tip
                 }
 
-                struct Tx <<定义在 types/tx/tx.pb.go 中>> #SkyBlue {
+                struct Tx <<types/tx/tx.pb.go>> #SkyBlue {
                     TxBody Body
                     ....
                     AuthInfo AuthInfo
                     ....
                     [][]byte Signatures
                 }
-                Tx o- TxBody
-                Tx o--AuthInfo
+                Tx o--> TxBody
+                Tx o--> AuthInfo
+
+                note as pbTxNote
+                    <code>
+                    func (t *Tx) GetMsgs() []sdk.Msg { 
+                        ...
+                        anys := t.Body.Messages
+
+                        //将 Any 结构体中的 cachedValue 字段
+                        //强制类型转换为 sdk.Msg
+                        res, err := GetMsgs(anys, "transaction")
+                        return res
+                    }
+                    </code>
+                end note 
+                Tx --> pbTxNote
+
+
+                struct TxRaw <<types/tx/tx.pb.go>> {
+                    BodyBytes []byte
+                    ....
+                    AuthInfoBytes []byte
+                    ....
+                    Signatures [][]byte
+                }
+                Tx -> TxRaw : 相关联
             }
             FeeTx <|-- tx.TipTx
             Tx <|-- tx.Tx
         }
 
-        codec.types.Any ----o types.tx.TxBody
-        codec.types.UnpackInterfacesMessage <|----- types.tx.TxBody
-        codec.types.UnpackInterfacesMessage <|------ types.tx.AuthInfo
+        codec.types.Any ---o types.tx.TxBody
+        codec.types.UnpackInterfacesMessage <|---- types.tx.TxBody
+        codec.types.UnpackInterfacesMessage <|---- types.tx.AuthInfo
         
-        namespace client {
-            interface TxBuilder {
-
-            }
-        }
 
         namespace x.auth {
             namespace tx {
                 interface ExtensionOptionsTxBuilder {
+                }
 
+                struct config {
+                    decoder     sdk.TxDecoder
+                    ....
+                    encoder     sdk.TxEncoder
+                    ....
+                    protoCodec  codec.ProtoCodecMarshaler
                 }
 
                 struct wrapper #SkyBlue {
-                    codec.Codec cdc
+                    cdc codec.Codec
                     ....
-                    tx.Tx tx
+                    tx *tx.Tx
                     ....
-                    []byte bodyBz
+                    bodyBz []byte
                     ....
-                    []byte authInfoBz
-                    ....
-                    bool txBodyHasUnknownNonCriticals
+                    authInfoBz []byte
                 }
                 note bottom of wrapper
+                    =实现的Tx接口函数
+                    ....
                     <code>
-                    GetMessage() {
-                        return tx.GetMsgs()
+                    func (w *wrapper) GetMsgs() []sdk.Msg {
+                        return w.tx.GetMsgs()
                     }
                     </code>
-                    ----
+                    ====
+                    =实现的TxBuilder接口函数
+                    ....
+                    <code>
+                    func (w *wrapper) SetMsgs(msgs ...sdk.Msg) error {
+                        anys, err := tx.SetMsgs(msgs)
+                        w.tx.Body.Messages = anys
+                        w.bodyBz = nil
+                    }
+                    </code>
+                    ....
+                    <code>
+                    //返回自己，因为它自己就实现了 Tx 接口
+                    func (w *wrapper) GetTx() authsigning.Tx {
+                        return w
+                    }
+                    </code>
                 end note
                 ExtensionOptionsTxBuilder <|-- wrapper
+
+                config --> wrapper : config创建的TxBuilder就是wrapper
+
+
             }
 
             namespace signing {
-                interface SigVerifiableTx {
+                collections ManyTxInf [
+                    =多种Tx接口，简直集齐了
+                    ----
+                    * SigVerifiableTx
+                    * types.Tx
+                    * types.TxWithMemo
+                    * types.FeeTx
+                    * types.tx.TipTx
+                    * types.TxWithTimeoutHeight
+                ]
 
-                }
+                interface Tx 
 
-                interface Tx {
-
-                }
-
-                SigVerifiableTx <|-- Tx
+                ManyTxInf <|-[thickness=3]- Tx
             }
             signing.Tx <|-- tx.wrapper
 
-            namespace ante {
-                interface HasExtensionOptionsTx {
+            ' namespace ante {
+            '     interface HasExtensionOptionsTx {
 
-                }
-            }
-            ante.HasExtensionOptionsTx <|-- tx.wrapper
+            '     }
+            ' }
+            ' ante.HasExtensionOptionsTx <|-- tx.wrapper
         }
+        client.TxConfig <|--- x.auth.tx.config
         client.TxBuilder <|-- x.auth.tx.ExtensionOptionsTxBuilder
-        types.tx.TipTx <|-- x.auth.tx.wrapper
 
-        x.auth.tx.wrapper::tx o-[#Blue]-> types.tx.Tx
+        types.tx.TipTx <|-[#Red]-- x.auth.tx.wrapper
+
+        x.auth.tx.wrapper o-up[#Blue,thickness=2]--> types.tx.Tx : <color:Blue>tx字段
     }
 
 
+@enduml
+
+@startuml 4.message的编码流程
+    title
+        message的编码流程
+        以 MsgEthereumTx 为例
+    end title
+
+    box Ethermint
+        participant "<struct>🚧 \n package rpc/backend \n Backend " as Backend
+
+        participant "<package>📦️ \n package x/evm/types" as xEvmTypes
+
+        participant "<struct>🚧 \n package x/evm/types \n MsgEthereumTx " as MsgEthereumTx
+
+
+    end box
+
+    box CosmosSDK
+        participant "<package>📦️ \n package codec/types" as codecTypes
+    end box
+
+    autonumber
+    autoactivate on
+
+
+    -> Backend : SendRawTransaction(data hexutil.Bytes)
+        note over Backend
+            // 这是 go-ethereum 中的类型
+            tx := &ethtypes.Transaction{}
+            ----
+            构造 ethereum 中的类型对 Tx 进行校验
+        end note 
+
+        note over Backend
+            先构造一个对象，再填充字段
+            ethereumTx := &evmtypes.MsgEthereumTx{}
+        end note 
+        Backend -> MsgEthereumTx : ethereumTx.FromEthereumTx(tx)
+            MsgEthereumTx -> xEvmTypes : NewTxDataFromTx(tx)
+                note over xEvmTypes
+                    在 NewTxDataFromTx 函数中：
+                    ----
+                    <code>
+                    switch tx.Type() {
+                    case ethtypes.DynamicFeeTxType:
+                        txData, err = newDynamicFeeTx(tx)
+                    case ethtypes.AccessListTxType:
+                        txData, err = newAccessListTx(tx)
+                    default:
+                        txData, err = newLegacyTx(tx)
+                    }
+                    </code>
+                end note 
+            return :txData : TxData
+
+            MsgEthereumTx -> xEvmTypes : PackTxData(txData)
+                note over xEvmTypes
+                    将 txData 强转为  proto.Message 类型：
+                    msg, ok := txData.(proto.Message)
+                    ----
+                    <img:../plantuml-img/plantumls/102.tx编解码/5.Evm模块的TxData.svg>
+                end note
+            return : anyTxData : codectypes.Any
+
+            MsgEthereumTx -> codecTypes : codecTypes.NewAnyWithValue(anyTxData)
+                note over codecTypes #LightPink
+                    <code>
+                    // v 就是 anyTxData
+                    bz, err := proto.Marshal(v)
+                    // 构造 Any 结构体并返回
+                    return &Any{
+                        TypeUrl:     "/" + proto.MessageName(v),
+                        Value:       bz,
+                        cachedValue: v,
+                    }, nil
+                    </code>
+                end note
+            return
+        return
+    return
+
+@enduml
+
+
+@startuml 5.Evm模块的TxData
+    title
+        Evm模块的TxData
+    end title
+
+    namespace Ethermint {
+        namespace x.evm {
+            namespace types {
+                interface TxData {
+
+                }
+                note right of TxData
+                    TxData 虽然没有实现 proto.Message 接口，
+                    但是它的实现类 AccessListTx， LegacyTx， 
+                    DynamicFeeTx 都实现了；
+                    ----
+                    因此，TxData 也可以看作是 proto.Message
+                end note 
+
+                struct LegacyTx {
+
+                }
+                struct AccessListTx {
+
+                }
+                struct DynamicFeeTx {
+
+                }
+
+                TxData <|-- LegacyTx
+                TxData <|-- AccessListTx
+                TxData <|-- DynamicFeeTx
+
+                interface "proto.Message" as Message <<定义在protobuf中>> {
+                    Reset()
+                    ....
+                    String() string
+                    ....
+                    ProtoMessage()
+                }
+                Message <|-[#Blue]- LegacyTx
+                Message <|-[#Blue]- AccessListTx
+                Message <|-[#Blue]- DynamicFeeTx
+            }
+        }
+    }
 @enduml

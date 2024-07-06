@@ -4,9 +4,18 @@
     namespace Tendermint #SkyBlue {
         namespace abci.types {
             interface Application {
-                //<b><color:DarkGreen> ABCI 功能接口
-                CheckTx(RequestCheckTx) ResponseCheckTx
+                =<color:DarkGreen>ABCI 查询接口
+                ----
+                Info(RequestInfo) ResponseInfo
                 ....
+                Query(RequestQuery) ResponseQuery
+                ====
+                =<color:DarkGreen>ABCI Mempool接口
+                ----
+                CheckTx(RequestCheckTx) ResponseCheckTx
+                ====
+                =<color:DarkGreen>ABCI 共识接口
+                ----
                 BeginBlock(RequestBeginBlock) ResponseBeginBlock
                 ....
                 DeliverTx(RequestDeliverTx) ResponseDeliverTx
@@ -14,7 +23,16 @@
                 EndBlock(RequestEndBlock) ResponseEndBlock
                 ....
                 Commit() ResponseCommit
+                ====
+                =<color:DarkGreen>ABCI snapshot接口
                 ----
+                ListSnapshots(RequestListSnapshots) ResponseListSnapshots
+                ....
+                OfferSnapshot(RequestOfferSnapshot) ResponseOfferSnapshot
+                ....
+                LoadSnapshotChunk(RequestLoadSnapshotChunk) ResponseLoadSnapshotChunk
+                ....
+                ApplySnapshotChunk(RequestApplySnapshotChunk) ResponseApplySnapshotChunk
             }
         }
     }

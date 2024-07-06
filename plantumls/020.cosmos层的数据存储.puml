@@ -1,27 +1,21 @@
-@startuml 1.CosmosSDK中的Store数据结构
+@startuml 1.CosmosSDK中-存储相关的类图
     title
-        1.CosmosSDK中的Store数据结构
+        CosmosSDK中-存储相关的类图
     end title
-
-    namespace Tendermint {
-        namespace abci {
-            struct Event {
-                string Type;
-                ....
-                []EventAttribute Attributes;
-            }
-        }
-    }
 
     namespace CosmosSDK {
         namespace baseapp {
-            struct BaseApp {
+            struct appStore #Tomato {
+                db dbm.DB // 后台数据库接口
+                ....
+                cms sdk.CommitMultiStore // main state
+            }
+            struct BaseApp #Tomato {
                 state* checkState;
                 ....
                 state* deliverState;
-
             }
-            note left of BaseApp 
+            note top of BaseApp 
                 checkState 在 mode 取以下值时使用:
                 * runTxModeCheck
                 * runTxModeReCheck
@@ -30,6 +24,7 @@
                 deliverState 在 mode 取以下值时使用:
                 * runTxModeDeliver
             end note 
+            appStore <|- BaseApp : 嵌入继承
 
             struct state {
                 types.CacheMultiStore ms;
@@ -37,8 +32,9 @@
                 types.Context ctx;
             }
 
-            BaseApp --> state
-        }
+            BaseApp o-[#Tomato]-> state
+        } 
+        'end baseapp
 
 
         namespace types {
@@ -51,8 +47,9 @@
             struct EventManager {
                 []Event events
             }
-            Context::eventManager o- EventManager
+            Context o--> EventManager : eventManager 字段
         }
+        'end types
 
         namespace snapshots.types {
             interface Snapshotter
@@ -61,6 +58,7 @@
         namespace store {
 
             namespace types {
+
                 interface CacheWrap {
                     Write()
                     ....
@@ -74,8 +72,10 @@
                     ....
                     CacheWrap CacheWrapWithTrace(w io.Writer, tc TraceContext)
                 }
-                CacheWrapper ..> CacheWrap
+                CacheWrapper .up.> CacheWrap : 根据接口定义，\n CacheWrap实际上 \n 继承了CacheWrapper
 
+
+                ' "第一级基础接口"
                 note as StoreType 
                     StoreType 的取值：
                     ----
@@ -95,34 +95,25 @@
 
                 interface BasicKVStore {
                     Get()
+                    ....
                     Has()
+                    ....
                     Set()
+                    ....
                     Delete()
                 }
-
-
-                interface MultiStore #SkyBlue {
-                    CacheMultiStore CacheMultiStore()
-                }
-                Store <|-- MultiStore
-
-                interface CacheMultiStore {
-                    Write()
-                }
-                MultiStore <|-- CacheMultiStore
-                MultiStore ...> CacheMultiStore
-
-
                 interface Committer {
                     CommitID Commit()
                     ....
                     CommitID LastCommitID()
                 }
-                interface CommitMultiStore {
+                ' end 第一级基础接口
 
+                ' 第二级基础接口
+                interface MultiStore #SkyBlue {
+                    CacheMultiStore CacheMultiStore()
                 }
-                MultiStore <|-- CommitMultiStore
-                Committer <|-- CommitMultiStore
+                Store <|-- MultiStore
 
                 interface KVStore {
                     Iterator Iterator()
@@ -130,26 +121,58 @@
                 Store <|-- KVStore
                 BasicKVStore <|-- KVStore
 
+                interface CommitStore
+                Committer <|-- CommitStore
+                Store <|-- CommitStore
+                ' end 第二级基础接口
+
+
+                interface CacheMultiStore {
+                    Write()
+                }
+                MultiStore <|-- CacheMultiStore
+
+
+
+                interface CommitMultiStore #LimeGreen {
+                    GetCommitStore()
+                    ....
+                    GetCommitKVStore()
+                }
+                MultiStore <|-- CommitMultiStore
+                Committer <|--- CommitMultiStore
+
+
+
                 interface CacheKVStore {
                     Write()
                 }
                 KVStore <|-- CacheKVStore
+
+                interface CommitKVStore {
+                }
+                KVStore <|--- CommitKVStore
+                Committer <|---[thickness=2]- CommitKVStore
             }
 
             namespace cachekv {
                 struct Store {
                     sync.Mutex
-                    map[string]*cValue cache
-                    map[string]struct{} deleted
-                    map[string]struct{} unsortedCache
-                    internal.BTree sortedCache
                     ....
+                    map[string]*cValue cache
+                    ....
+                    map[string]struct{} deleted
+                    ....
+                    map[string]struct{} unsortedCache
+                    ....
+                    internal.BTree sortedCache
+                    ----
                     types.KVStore parent;
                 }
 
             }
-            types.CacheKVStore <|--- cachekv.Store
-            cachekv.Store::parent o----> types.KVStore
+            types.CacheKVStore <|--- cachekv.Store : 实现接口
+            cachekv.Store o--[#Navy,thickness=1]--> types.KVStore : 组合模式; \n parent字段
 
             namespace cachemulti {
                 struct Store {
@@ -160,14 +183,437 @@
                     map[string]types.StoreKey keys;
                 }
             }
-            types.CacheMultiStore <|-- cachemulti.Store
-            cachemulti.Store::db o---> cachekv.Store
+            types.CacheMultiStore <|--- cachemulti.Store : 实现接口
+            cachemulti.Store o---> types.CacheKVStore : db 字段
+
+
+            namespace rootmulti {
+                struct Store {
+                    db dbm.DB
+                    ....
+                    stores map[types.StoreKey]types.CommitKVStore
+                }
+            }
+            types.CommitMultiStore <|-[#DarkGreen,thickness=2]-- rootmulti.Store : 实现接口
+            rootmulti.Store o---> types.CommitKVStore : stores 字段
+
+            namespace cache {
+                struct CommitKVStoreCache {
+                    cache *lru.ARCCache
+                }
+            }
+            types.CommitKVStore <|-- cache.CommitKVStoreCache #line.bold : 嵌入接口 \n 即继承也组合
+
+            namespace iavl {
+                struct Store #DodgerBlue {
+                    tree   Tree
+                }
+            }
+            types.CommitKVStore <|-- iavl.Store #line:RoyalBlue : 实现接口
         }
-        snapshots.types.Snapshotter <|-- store.types.CommitMultiStore
-        baseapp.state::ctx o--- types.Context
-        types.Context::ms o---- store.cachemulti.Store
+        'end store
+
+        snapshots.types.Snapshotter <|---- store.types.CommitMultiStore
+        baseapp.state o-[#Tomato]-> types.Context : ctx
+        baseapp.appStore o--[#Tomato,thickness=2]-> store.types.CommitMultiStore : cms
+        types.Context o--[#Tomato,thickness=2]-> store.types.MultiStore : ms
 
     }
+
+
+@enduml
+
+
+@startuml 2. CosmosSDK中-存储相关的对象图
+    title
+        CosmosSDK中-存储相关的对象图
+        节点初始化完成时的状态
+    end title
+
+    database db [
+        =leveldb
+        ----
+    ]
+
+    object BaseApp {
+        <color:DarkGreen>//嵌入 appStore 得到的字段</color>
+        ....
+        db
+        ....
+        cms
+        ....
+        interBlockCache sdk.MultiStorePersistentCache
+        ====
+        deliverState *state
+        ....
+        checkState *state
+        ----
+    }
+
+    BaseApp o---> db : db 字段
+
+
+    namespace Ethermint {
+        object EthermintApp {
+
+        }        
+    }
+
+    BaseApp <|- EthermintApp
+
+
+    namespace store {
+        namespace rootmulti {
+            object "Store" as rootmultiStore {
+                =永久存储
+                ====
+                db dbm.DB
+                ....
+                stores map[types.StoreKey]types.CommitKVStore
+                ....
+                interBlockCache types.MultiStorePersistentCache
+            }
+            BaseApp *--> rootmultiStore : cms 字段
+            rootmultiStore o---> db : db 字段
+        }
+        
+        namespace iavl {
+            object "Store" as iavlStore{
+                tree
+                ....
+                logger
+            }
+        }
+
+        namespace cache {
+            object CommitKVStoreCacheManager {
+                size; //初始值为1000
+                ----
+                caches    map[string]types.CommitKVStore
+            }
+
+            object CommitKVStoreCache {
+                CommitKVStore: store
+                ....
+                cache: cache, // = lru.NewARC(int(size))
+            }
+
+            CommitKVStoreCacheManager o--> CommitKVStoreCache : store字段
+        }
+
+        note as BaseApp_2_cache_CommitKVStoreCacheManager
+            BaseApp.interBlockCache 字段
+            app.toml 中 inter-block-cache=true 时
+            会创建 CommitKVStoreCacheManager 对象
+        end note 
+        BaseApp o-- BaseApp_2_cache_CommitKVStoreCacheManager
+        BaseApp_2_cache_CommitKVStoreCacheManager --> CommitKVStoreCacheManager 
+
+        CommitKVStoreCache o--> iavlStore : store 字段
+
+
+        rootmultiStore o--> cache.CommitKVStoreCacheManager : interBlockCache 字段
+
+
+        note as rootmultiStore_stores_expand
+            stores 字段是一个 Map, 它的 value 字段会存放多种类型的对象
+            1. CommitKVStoreCache 包装 后的  iavl.Store
+            2. transient.Store
+            3. mem.Store
+        end note 
+        rootmultiStore o-- rootmultiStore_stores_expand : stores 字段
+
+        rootmultiStore_stores_expand ---> CommitKVStoreCache 
+    }
+
+@enduml
+
+@startuml 3.BaseApp中存储相关对象的初始化流程
+    title 
+        BaseApp中存储相关对象的初始化流程
+    end title
+
+    box Ethermint
+        participant "<object>🎁️ \n package server 中 \n StartCmd 函数 \n 返回的 cobra.Command 对象" as StartCmd
+        participant "<package>📦️ \n package server" as server
+
+        participant "<struct>🚧 \n package main 中 \n appCreator \n 它的实例在NewRootCmd函数中创建\n 它的实例没有专门存储" as appCreator
+
+        participant "<package>📦️ \n package app" as app
+    end box 
+
+
+    box CosmosSDK
+        participant "<package>📦️ \n package server" as cosmosServer
+
+        participant "<package>📦️ \n package baseapp" as baseapp
+        participant "<struct>🚧 \n package baseapp \n BaseApp 结构体" as baseapp_BaseApp
+
+        participant "<package>📦️ \n package store" as store
+        participant "<package>📦️ \n package store/rootmulti" as rootmulti
+        participant "<struct>🚧 \n package store/rootmulti \n Store 结构体" as cms
+
+        participant "<struct>🚧 \n package store/cache \n CommitKVStoreCacheManager 结构体" as CommitKVStoreCacheManager
+
+        participant "<package>📦️ \n package store/iavl" as iavl
+
+        participant "<package>📦️ \n package store/transient" as transient
+
+        participant "<package>📦️ \n package store/mem" as mem
+
+        participant "<package>📦️ \n package store/dbadapter" as dbadapter
+    end box 
+
+    autonumber
+    autoactivate on
+
+    ->> StartCmd : 辗转来自 main 函数的调用 \
+    \n 调用 cobra.Command 对象实现的 RunE 方法
+
+        StartCmd -> server : startInProcess(serverCtx, clientCtx, opts)
+            note over server
+                opts 对应的结构体是 package server 中的
+                ----
+                <code>
+                type StartOptions struct {
+                    AppCreator      types.AppCreator
+                    DefaultNodeHome string
+                    DBOpener        DBOpener
+                }
+                </code>
+                ----
+                其中的 DBOpener 是一个函数指针，指向的函数是
+                cosmos-sdk中， package server 中的 GetAppDBBackend 函数
+            end note 
+
+            server -> cosmosServer : opts.DBOpener(ctx.Viper, home, server.GetAppDBBackend(ctx.Viper))
+                note over cosmosServer #SkyBlue
+                    优先读取 app.toml 中的 app-db-backend 字段；
+                    如果没有，则读取 config.toml 中的 db-backend 字段；
+                    <color:red>注意，config.toml 中有一个 db_backend，但没有 db-backend</color>
+                    如果没有，则使用默认值：goleveldb
+                end note 
+            return : dbm.DB
+
+            note over server #LimeGreen
+                略过一些代码
+            end note 
+
+            note over server
+                opts.AppCreator 是一个函数指针，指向的函数是
+                package main 中， appCreator 结构体的 newApp 函数
+            end note
+            server -> appCreator : opts.AppCreator(ctx.Logger, db, traceWriter, ctx.Viper)
+                note over appCreator
+                    当前在 appCreator.newApp 函数中
+                end note 
+                note over appCreator
+                    cache = store.NewCommitKVStoreCacheManager()
+                    cache 指向 CosmosSDK 的 store.cache.CommitKVStoreCacheManager 结构体
+                end note 
+
+                appCreator -> app : app.NewEthermintApp
+                    note over appCreator, app 
+                        参数 baseAppOptions 是一个闭包函数列表， 
+                        包含了很多为 BaseApp 设置参数的闭包函数
+                        其中，就有 baseapp.SetInterBlockCache(cache)
+                    end note 
+
+                    app -> baseapp : baseapp.NewBaseApp
+                        baseapp -> store : store.NewCommitMultiStore(db)
+                            store -> rootmulti : rootmulti.NewStore(db,)
+                            return : cms
+                        return : cms 
+                    return :bApp
+
+                    note over app 
+                        keys = sdk.NewKVStoreKeys(...keys)
+                        ----
+                        keys 是一个 map[string]*sdk.KVStoreKey
+                        KVStoreKey 内部只有一个字段 name string
+                        ....
+                        这段代码做的工作实际上是建立了映射：
+                        "xxx" => KVStoreKey{"xxx"}
+                        ====
+                        下面的 tKeys, memKeys 是同样的道理
+                    end note
+
+                    note over app
+                        app := &EthermintApp{...}
+                        ....
+                        在 EthermintApp 中，记录了 keys, tKeys, memKeys
+                    end note 
+
+                    note over app 
+                        初始化 app 中的各个 Keeper
+                    end note 
+
+                    note over app
+                        初始化 app.mm; module manager
+                    end note 
+
+                    note over app
+                        通过 module manager 注册路由
+                        ----
+                        app.mm.RegisterRoutes(...)
+                        app.mm.RegisterServices(...)
+                    end note 
+
+                    group#DodgerBlue  "存储初始化" 
+                        app -> baseapp_BaseApp #LimeGreen : app.MountKVStores(keys)
+                            loop "遍历 kyes 的所有 k,v"
+                                note over baseapp_BaseApp 
+                                    忽略k,
+                                    变量 key = v, 
+                                    key 是一个 *sdk.KVStoreKey
+                                end note
+                                baseapp_BaseApp -> baseapp_BaseApp #DeepSkyBlue : app.MountStore(key, storetypes.StoreTypeIAVL)
+                                    baseapp_BaseApp -> cms : app.cms.MountStoreWithDB(key, typ, nil)
+                                        note over cms
+                                            初始化了 Store(app.cms) 中的 
+                                            =1. <color:red>storesParams
+                                            =2. <color:red>keysByName
+                                            两个字段
+                                            ----
+                                            <code>
+                                            rs.storesParams[key] = newStoreParams(key, db, typ, 0)
+                                            rs.keysByName[key.Name()] = key
+                                            </code>
+                                        end note
+                                    return
+                                return
+                            end loop
+                        return
+                        note over app
+                            app.MountTransientStores(tkeys)
+                            app.MountMemoryStores(memKeys)
+                            和上面的 app.MountKVStores(keys) 流程一致
+                        end note 
+                    end group
+
+                    group#DodgerBlue #LightBlue "loadLatest 固定为true； 执行 app.LoadLatestVersion()"
+                        note over app 
+                            app.LoadLatestVersion() 是 baseapp.BaseApp 的方法
+                        end note 
+                        app -> baseapp_BaseApp #LimeGreen : app.LoadLatestVersion()
+                            note over baseapp_BaseApp
+                                app.storeLoader 被初始化为 baseapp.DefaultStoreLoader
+                            end note
+                            baseapp_BaseApp -> baseapp : app.storeLoader(app.cms)
+                                note over baseapp
+                                    在 baseapp.DefaultStoreLoader 函数中
+                                    ----
+                                    <code>
+                                    func DefaultStoreLoader(ms sdk.CommitMultiStore) error {
+                                        return ms.LoadLatestVersion()
+                                    }
+                                    </code>
+                                end note
+
+                                baseapp -> cms : ms.LoadLatestVersion()
+                                    note over cms
+                                        ver := GetLatestVersion(rs.db)
+                                        ----
+                                        从leveldb中取出 key="s/latest" 对应的 value
+                                        解码后，就是 version 值
+                                    end note 
+                                    
+                                    cms -> cms #LimeGreen : rs.loadVersion(ver, nil)
+                                        alt "ver != 0"
+                                            cms -> rootmulti : getCommitInfo(rs.db, ver)
+                                                note over rootmulti
+                                                    以 （"s/%d", version） 为 key 
+                                                    从 leveldb 中取出 value
+                                                    该 value 解码后，就是 CommitInfo 结构体
+                                                end note 
+                                            return : cInfo *types.CommitInfo
+
+                                            note over cms
+                                                cInfo 中有一个 types.StoreInfo 数组
+                                                将它按 storeInfo.Name => storeInfo 拼成一个 map
+                                                这个map名为  infos
+                                                ----
+                                                <code>
+                                                infos[storeInfo.Name] = storeInfo
+                                                </code>
+                                            end note 
+
+                                            note over cms
+                                                取出 cms.storesParams 中的所有 key
+                                                存放在变量 storesKeys 中
+                                                ----
+                                                准备一个和 cms.stores 类型一样的空新变量 newStores
+                                            end note 
+                                            loop "遍历 storesKeys, 元素赋值给 key"
+                                                note over cms
+                                                    取出 key 对应的 storeParams
+                                                    storeParams := rs.storesParams[key]
+                                                    ....
+                                                    从 infos 中 取出 commitID
+                                                    commitID := rs.getCommitID(infos, key.Name())
+                                                end note 
+
+                                                cms -> cms #DeepSkyBlue : rs.loadCommitStoreFromParams(key, commitID, storeParams)
+                                                    note over cms
+                                                        每个 key 对应的数据库，使用 s/k:<param.key.Name()>/ 最为前缀生成的新 数据库
+                                                    end note 
+                                                    alt "param.typ == types.StoreTypeIAVL"
+                                                        note over cms 
+                                                            这是 EthermintApp.keys 中的 key 对应的类型
+                                                        end note
+
+                                                        alt "params.initialVersion == 0"
+                                                            cms -> iavl : iavl.LoadStore(db, rs.logger, key, id, rs.lazyLoading, rs.iavlCacheSize, rs.iavlDisableFastNode)
+                                                            return : store
+                                                        else "params.initialVersion != 0"
+                                                            cms -> iavl : iavl.LoadStoreWithInitialVersion(db, rs.logger, key, id, rs.lazyLoading, params.initialVersion, rs.iavlCacheSize, rs.iavlDisableFastNode)
+                                                            return : store
+                                                        end alt
+                                                        
+                                                        cms -> CommitKVStoreCacheManager : rs.interBlockCache.GetStoreCache(key, store)
+                                                            note over cms, CommitKVStoreCacheManager
+                                                                <color:red>再为 store 裹一层 cache
+                                                                ----
+                                                                <code>
+                                                                cmgr.caches[key.Name()] = NewCommitKVStoreCache(store, cmgr.cacheSize)
+                                                                return cmgr.caches[key.Name()]
+                                                                </code>
+                                                            end note
+                                                        return : store
+                                                            
+                                                    else #LightPink "param.typ == types.StoreTypeTransient"
+                                                        note over cms 
+                                                            这是 EthermintApp.tKeys 中的 key 对应的类型
+                                                        end note
+                                                        cms -> transient : transient.NewStore()
+                                                        return : store
+                                                    else "param.typ == types.StoreTypeMemory"
+                                                        note over cms 
+                                                            这是 EthermintApp.memKeys 中的 key 对应的类型
+                                                        end note
+                                                        cms -> mem : mem.NewStore()
+                                                        return : store
+                                                    else #LightPink "param.typ == types.StoreTypeDB"
+                                                        cms -> dbadapter : dbadapter.NewStore(db)
+                                                        return : store
+                                                        note over cms
+                                                            return commitDBStoreAdapter{Store: dbadapter.Store{DB: db}}
+                                                        end note 
+                                                    end alt
+                                                return : store
+                                            end loop 
+                                        end alt 
+                                    return
+                                return
+                            return
+                        return
+                    end group
+
+                return : ethermintApp
+            return : app
+        return
+
+    return
 
 
 @enduml

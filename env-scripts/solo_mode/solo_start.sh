@@ -2,7 +2,7 @@
 
 WORK_DIR=/tmp/solo_dir
 
-LOGLEVEL="info"
+LOGLEVEL="debug"
 # trace evm
 TRACE="--trace"
 
